@@ -62,8 +62,6 @@ This project delivers a comprehensive reusable auction engine supporting all 13 
 - `README.md` - Project documentation.
 
 ## Notes
-- Use `Bun` as package manager with typescript; 
-- For server support use `Elysia` with Websockets + OTL + GraphQL + Pino; 
 - Unit tests should be in separate, dedicated `tests` folder (not to be mixed with code files in the `src` folder).
 - Use `Bun test [optional/path/to/test/file]` to run tests. Running without a path executes all tests found by the Bun test configuration.
 - Apart from unit tests we should have a test driver (CLI) that can test end-to-end engine with various different test mock auction scenarios (preferably loaded from test JSON file);
@@ -74,9 +72,18 @@ This project delivers a comprehensive reusable auction engine supporting all 13 
 - Avoid memory allocations and aim for zero-copy;
 - Code Reliability must be very high; It should be fault-tolerant and crash-resilient;
 - Use branded types instead of plain types wherever possible.
+- If something is not clear or not stated explicitly, do not assume anything - ask explicitly for clarifications instead of deciding one or other.
+  
+## Tech stack
+- This project is primarily a "reusable backend library". It does not have an actual server, instead it provides APIs and interfaces needed so that any server (such as Elysia or Encore.ts or Express) can directly plugin this package and start offering auction functionality.
+- Use `Bun` as package manager with typescript; 
+- Use OTL + GraphQL Yoga + Pino + GRPC; 
+- Database: Drizzle ORM with Postgres as primary for development; In production use the database based on the config settings;
+- Use `Biomejs` for format, linting etc.
+- For auth assume this is behind a pre-authenticated proxy; You will get `tenantId`;
 
 ## Tasks
-- [ ] 0.0 Research
+- [x] 0.0 Research
   - [x] 0.1 identify different types of auctions that are used in the real-world (identified 13 types: English, Dutch, Sealed-bid, Reverse, Vickrey, Buy-it-now, Double, All-Pay, Japanese, Chinese, Penny, Multi-Unit, and Combinatorial auctions)
   - [x] 0.2 identify the database schema to hold the auction data and the bids for those auctions; 
   - [x] 0.3 identify the SQL queries required to determine the winner for each auction type; (Completed: Comprehensive SQL query designs created in docs/winner-determination-sql-queries.md)
@@ -85,12 +92,12 @@ This project delivers a comprehensive reusable auction engine supporting all 13 
   - [x] 0.6 Identify reusable patterns in the code and plan the helper methods, common interfaces, reusable types; (Completed: Comprehensive reusable patterns design created in docs/0-6-reusable-patterns.md, featuring common interfaces for auction operations, helper methods for lifecycle management, utility functions for bid validation, branded types for type safety, factory patterns for auction creation, strategy patterns for auction-specific logic, decorator patterns for cross-cutting concerns, and performance optimizations with zero-copy operations)
   - [x] 0.7 Identify all different branded types needed; (Completed: Comprehensive branded types design created in docs/0-7-branded-types.md, featuring 50+ branded types covering monetary values, temporal types, identification types, auction-specific types, business rules, notifications, and payment processing; eliminates primitive obsession and ensures type safety across all 13 auction types); 
 
-- [ ] 1.0 Core Infrastructure Setup
-  - [ ] 1.1 Design and implement database schema for auctions, bids, configurations, and audit logs
-  - [ ] 1.2 Create core TypeScript types and interfaces for the auction system
-  - [ ] 1.3 Implement database abstraction layer supporting multiple SQL databases
-  - [ ] 1.4 Set up basic project structure and configuration files
-  - [ ] 1.5 Create core utilities and constants for the auction engine
+- [x] 1.0 Core Infrastructure Setup
+  - [x] 1.1 Review the research findings from the files in the `docs/` folder and use them for all further tasks and sub-tasks;
+  - [x] 1.2 Set up basic project structure and configuration files based on the tech-stack and research findings;
+  - [x] 1.3 Create core TypeScript types and interfaces for the auction system
+  - [x] 1.4 Implement database abstraction layer supporting multiple SQL databases
+  - [x] 1.5 Create core utilities and constants for the auction engine
 
 - [ ] 2.0 Auction Management System
   - [ ] 2.1 Implement auction factory pattern for creating different auction types
