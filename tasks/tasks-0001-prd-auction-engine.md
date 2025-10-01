@@ -1,0 +1,140 @@
+## Relevant Files (draft, needs to be reviewed and updated)
+
+This project delivers a comprehensive reusable auction engine supporting all 13 auction types (English, Dutch, Sealed-bid, Reverse, Vickrey, Buy-it-now, Double, All-Pay, Japanese, Chinese, Penny, Multi-Unit, and Combinatorial auctions) with zero-copy operations, comprehensive type safety through branded types that prevent primitive obsession, and performance optimization through extensive reusable patterns design.
+
+- `docs/0-1-0-auction-types-research.md` - Comprehensive analysis of 13 auction types and their characteristics.
+- `docs/0-2-core-auction-tables-schema.md` - Core auction tables design (auctions, auction_items, auction_configurations)
+- `docs/0-2-bid-management-tables-schema.md` - Bid management tables design (bids, bid_history, bid_retractions)
+- `docs/0-2-user-management-tables-schema.md` - User management tables design (users, user_profiles, user_preferences)
+- `docs/0-2-audit-logging-tables-schema.md` - Audit and logging tables design (audit_trail, system_events, immutable_logs)
+- `docs/0-2-business-rules-tables-schema.md` - Business rules tables design (rules, rule_configurations, rule_violations)
+- `docs/0-2-notification-realtime-tables-schema.md` - Notification and real-time features tables design (notifications, websocket_connections, real_time_events)
+- `docs/0-2-indexing-strategy-performance.md` - Comprehensive indexing strategy for performance optimization
+- `docs/0-1-1-auction-type-special-considerations.md` - Special considerations for each of the 13 auction types
+- `docs/0-2-entity-relationship-diagram-validation.md` - Entity relationship diagram and validation rules
+- `docs/0-3-winner-determination-sql-queries.md` - Comprehensive SQL query designs for winner determination across all 13 auction types
+- `docs/0-4-architecture.md` - Comprehensive package architecture design for reusable auction engine with CRUD APIs across REST, gRPC, and GraphQL interfaces
+- `docs/0-6-reusable-patterns.md` - Comprehensive reusable patterns design supporting all 13 auction types with zero-copy operations, type safety, and performance optimization
+- `docs/0-7-branded-types.md` - Comprehensive branded types design for type safety across all 13 auction types, preventing primitive obsession and ensuring domain-specific type safety
+- `src/types/index.ts` - Core TypeScript types and interfaces for auctions, bids, and business rules.
+- `src/types/auction.ts` - Auction-specific type definitions.
+- `src/types/bid.ts` - Bid-specific type definitions.
+- `src/types/business-rules.ts` - Business rules configuration types.
+- `src/database/schema.sql` - Database schema definitions for multiple SQL databases.
+- `src/database/migrations/` - Database migration files.
+- `src/database/connection.ts` - Database connection and abstraction layer.
+- `src/database/queries/` - SQL query builders for winner determination.
+- `src/core/auction-factory.ts` - Factory pattern for creating different auction types.
+- `src/core/auction-manager.ts` - Main auction lifecycle management.
+- `src/auction-types/english-auction.ts` - English auction implementation.
+- `src/auction-types/dutch-auction.ts` - Dutch auction implementation.
+- `src/auction-types/sealed-bid-auction.ts` - Sealed-bid auction implementation.
+- `src/auction-types/reverse-auction.ts` - Reverse auction implementation.
+- `src/auction-types/vickrey-auction.ts` - Vickrey auction implementation.
+- `src/auction-types/buy-it-now-auction.ts` - Buy-it-now auction implementation.
+- `src/auction-types/double-auction.ts` - Double auction implementation.
+- `src/auction-types/all-pay-auction.ts` - All-pay auction implementation.
+- `src/auction-types/japanese-auction.ts` - Japanese auction implementation.
+- `src/auction-types/chinese-auction.ts` - Chinese auction implementation.
+- `src/auction-types/penny-auction.ts` - Penny auction implementation.
+- `src/auction-types/multi-unit-auction.ts` - Multi-unit auction implementation.
+- `src/auction-types/combinatorial-auction.ts` - Combinatorial auction implementation.
+- `src/business-rules/engine.ts` - Business rules validation engine.
+- `src/business-rules/validators/` - Individual rule validators.
+- `src/bid/bid-manager.ts` - Bid processing and management.
+- `src/bid/bid-validator.ts` - Bid validation logic.
+- `src/winner-determination/service.ts` - Winner determination service.
+- `src/winner-determination/sql-queries.ts` - Database-specific SQL queries.
+- `src/notifications/service.ts` - Real-time notification service.
+- `src/notifications/websocket.ts` - WebSocket implementation for real-time updates.
+- `src/api/routes.ts` - API route handlers.
+- `src/api/middleware.ts` - API middleware for validation and error handling.
+- `src/audit/trail.ts` - Audit trail management.
+- `src/audit/logger.ts` - Immutable logging system.
+- `src/utils/constants.ts` - Application constants.
+- `src/utils/helpers.ts` - Utility functions.
+- `src/config/index.ts` - Configuration management.
+- `tests/unit/` - Unit tests for all components.
+- `tests/integration/` - Integration tests.
+- `tests/utils/test-helpers.ts` - Test utilities and mocks.
+- `package.json` - Project dependencies and scripts.
+- `tsconfig.json` - TypeScript configuration.
+- `README.md` - Project documentation.
+
+## Notes
+- Use `Bun` as package manager with typescript; 
+- For server support use `Elysia` with Websockets + OTL + GraphQL + Pino; 
+- Unit tests should be in separate, dedicated `tests` folder (not to be mixed with code files in the `src` folder).
+- Use `Bun test [optional/path/to/test/file]` to run tests. Running without a path executes all tests found by the Bun test configuration.
+- Apart from unit tests we should have a test driver (CLI) that can test end-to-end engine with various different test mock auction scenarios (preferably loaded from test JSON file);
+- Database schema should support immutability for audit trails.
+- All SQL queries should be database-agnostic where possible.
+- Consider performance requirements for real-time bidding.
+- Coding standards: use prefix `I` for typescript interfaces (e.g. `interface IBid`) and prefix `T` for types (e.g. `type IEntry`);
+- Avoid memory allocations and aim for zero-copy;
+- Code Reliability must be very high; It should be fault-tolerant and crash-resilient;
+- Use branded types instead of plain types wherever possible.
+
+## Tasks
+- [ ] 0.0 Research
+  - [x] 0.1 identify different types of auctions that are used in the real-world (identified 13 types: English, Dutch, Sealed-bid, Reverse, Vickrey, Buy-it-now, Double, All-Pay, Japanese, Chinese, Penny, Multi-Unit, and Combinatorial auctions)
+  - [x] 0.2 identify the database schema to hold the auction data and the bids for those auctions; 
+  - [x] 0.3 identify the SQL queries required to determine the winner for each auction type; (Completed: Comprehensive SQL query designs created in docs/winner-determination-sql-queries.md)
+  - [x] 0.4 decide how to expose this functionality as a reusable package that can be plugged and played in any project; This may need exposing certain CRUD API to create/manage the auctions and bids. Need to support REST, grpc and GraphQL interfaces; (Completed: Comprehensive package architecture design created in docs/0-4-architecture.md, featuring abstraction layers for database, API, and notification systems; supports CRUD APIs across REST, gRPC, and GraphQL interfaces; implements SOLID principles with dependency injection; provides unified configuration management and error handling strategy)
+  - [x] 0.5 identify the layers needed to keep the code organized clean (preferably SOLID principles); Since we need to support different databases, different API interfaces, different notification types etc., we should have a DB abstraction layer, API abstraction layer, Notification abstraction layer etc., each supporting various different implementations (such as different databases, different API interfaces etc.);
+  - [x] 0.6 Identify reusable patterns in the code and plan the helper methods, common interfaces, reusable types; (Completed: Comprehensive reusable patterns design created in docs/0-6-reusable-patterns.md, featuring common interfaces for auction operations, helper methods for lifecycle management, utility functions for bid validation, branded types for type safety, factory patterns for auction creation, strategy patterns for auction-specific logic, decorator patterns for cross-cutting concerns, and performance optimizations with zero-copy operations)
+  - [x] 0.7 Identify all different branded types needed; (Completed: Comprehensive branded types design created in docs/0-7-branded-types.md, featuring 50+ branded types covering monetary values, temporal types, identification types, auction-specific types, business rules, notifications, and payment processing; eliminates primitive obsession and ensures type safety across all 13 auction types); 
+
+- [ ] 1.0 Core Infrastructure Setup
+  - [ ] 1.1 Design and implement database schema for auctions, bids, configurations, and audit logs
+  - [ ] 1.2 Create core TypeScript types and interfaces for the auction system
+  - [ ] 1.3 Implement database abstraction layer supporting multiple SQL databases
+  - [ ] 1.4 Set up basic project structure and configuration files
+  - [ ] 1.5 Create core utilities and constants for the auction engine
+
+- [ ] 2.0 Auction Management System
+  - [ ] 2.1 Implement auction factory pattern for creating different auction types
+  - [ ] 2.2 Create English auction implementation with ascending price logic
+  - [ ] 2.3 Create Dutch auction implementation with descending price logic
+  - [ ] 2.4 Create sealed-bid auction implementation with hidden bidding
+  - [ ] 2.5 Create reverse auction implementation for supplier bidding
+  - [ ] 2.6 Create Vickrey auction implementation with second-price sealed bidding
+  - [ ] 2.7 Create buy-it-now auction implementation for immediate purchase
+  - [ ] 2.8 Create double auction implementation with buyer/seller matching
+  - [ ] 2.9 Create all-pay auction implementation where all bidders pay
+  - [ ] 2.10 Create Japanese auction implementation with elimination rounds
+  - [ ] 2.11 Create Chinese auction implementation with rapid price drops
+  - [ ] 2.12 Create penny auction implementation with bid fees and time extension
+  - [ ] 2.13 Create multi-unit auction implementation for multiple identical items
+  - [ ] 2.14 Create combinatorial auction implementation for package bidding
+  - [ ] 2.15 Implement auction configuration management system
+  - [ ] 2.16 Create auction lifecycle management (create, start, end, cancel)
+
+- [ ] 3.0 Business Rules Engine
+  - [ ] 3.1 Design business rules configuration system
+  - [ ] 3.2 Implement minimum bid increment validation
+  - [ ] 3.3 Implement maximum bids per user validation
+  - [ ] 3.4 Implement bid retraction time limit logic
+  - [ ] 3.5 Implement reserve price handling
+  - [ ] 3.6 Implement auction duration settings and management
+  - [ ] 3.7 Implement auto-extension rules for last-minute bidding
+  - [ ] 3.8 Create rules validation engine with comprehensive error handling
+
+- [ ] 4.0 Bid Processing System
+  - [ ] 4.1 Implement bid submission API with validation
+  - [ ] 4.2 Create real-time bid processing system
+  - [ ] 4.3 Implement concurrent bid handling for high-throughput scenarios
+  - [ ] 4.4 Create immutable bid storage system
+  - [ ] 4.5 Implement bid retraction functionality within time limits
+  - [ ] 4.6 Add comprehensive bid validation against auction rules
+  - [ ] 4.7 Implement error handling for invalid bids and network issues
+
+- [ ] 5.0 Winner Determination & Real-time Features
+  - [ ] 5.1 Implement SQL-based winner determination queries for each auction type
+  - [ ] 5.2 Create tie-breaking logic for auctions with multiple high bids
+  - [ ] 5.3 Implement atomic auction status updates
+  - [ ] 5.4 Create real-time notification system for bid updates
+  - [ ] 5.5 Implement WebSocket/SSE for live auction updates
+  - [ ] 5.6 Create API endpoints for auction status and winner information
+  - [ ] 5.7 Implement audit trail maintenance for all auction activities
+  - [ ] 5.8 Add performance monitoring and debugging capabilities
