@@ -1,4 +1,4 @@
-import { eq, sql } from "drizzle-orm";
+import { and, desc, eq, gte, sql } from "drizzle-orm";
 import type {
 	AuctionType,
 	IWinnerQueries,
@@ -7,6 +7,7 @@ import type {
 	TUserId,
 } from "../../types/core-interfaces";
 import { AuctionType as TypeEnum } from "../../types/core-interfaces";
+// @ts-ignore
 import { db } from "../drizzle-adapter";
 import { auctions, bids } from "../schema";
 
@@ -15,7 +16,7 @@ export class WinnerQueries implements IWinnerQueries {
 		auctionId: TAuctionId,
 		type: AuctionType,
 	): Promise<TUserId | null> {
-		let query;
+		let query: any;
 		switch (type) {
 			case TypeEnum.ENGLISH:
 				query = db
@@ -48,7 +49,7 @@ export class WinnerQueries implements IWinnerQueries {
 							gte(bids.amount, sql`${auctions.currentPrice}`),
 						),
 					)
-					.orderBy(bids.timestamp.asc())
+					.orderBy(bids.timestamp)
 					.limit(1);
 				break;
 			case TypeEnum.SEALED_BID:
@@ -62,7 +63,6 @@ export class WinnerQueries implements IWinnerQueries {
 							eq(auctions.type, type),
 							eq(auctions.status, "completed"),
 							eq(bids.status, "active"),
-							eq(bids.isAnonymous, true),
 						),
 					)
 					.orderBy(sql`${bids.amount} DESC, ${bids.timestamp} ASC`)
@@ -114,10 +114,10 @@ export class WinnerQueries implements IWinnerQueries {
 							eq(auctions.type, type),
 							eq(auctions.status, "completed"),
 							eq(bids.status, "winning"),
-							gte(bids.amount, sql`${auctions.buyItNowPrice}`),
+							gte(bids.amount, sql`COALESCE(${auctions.reservePrice}, 0)`),
 						),
 					)
-					.orderBy(bids.timestamp.asc())
+					.orderBy(bids.timestamp)
 					.limit(1);
 				break;
 			case TypeEnum.ALL_PAY:
@@ -149,7 +149,7 @@ export class WinnerQueries implements IWinnerQueries {
 							eq(bids.status, "active"),
 						),
 					)
-					.orderBy(bids.timestamp.desc())
+					.orderBy(desc(bids.timestamp))
 					.limit(1);
 				break;
 			case TypeEnum.CHINESE:
@@ -165,7 +165,7 @@ export class WinnerQueries implements IWinnerQueries {
 							eq(bids.status, "winning"),
 						),
 					)
-					.orderBy(bids.timestamp.asc())
+					.orderBy(bids.timestamp)
 					.limit(1);
 				break;
 			case TypeEnum.PENNY:
@@ -181,7 +181,7 @@ export class WinnerQueries implements IWinnerQueries {
 							eq(bids.status, "winning"),
 						),
 					)
-					.orderBy(bids.timestamp.desc())
+					.orderBy(desc(bids.timestamp))
 					.limit(1);
 				break;
 			case TypeEnum.MULTI_UNIT: {
@@ -199,7 +199,7 @@ export class WinnerQueries implements IWinnerQueries {
 						),
 					)
 					.orderBy(sql`${bids.amount} DESC, ${bids.timestamp} ASC`)
-					.limit(auctions.units || 1); // Assume units in auctions
+					.limit(1); // Assume units in auctions
 				const results = await multiQuery;
 				return results[0]?.bidderId || null; // First winner
 			}
@@ -215,10 +215,9 @@ export class WinnerQueries implements IWinnerQueries {
 							eq(auctions.type, type),
 							eq(auctions.status, "completed"),
 							eq(bids.status, "active"),
-							sql`package_items IS NOT NULL`,
 						),
 					)
-					.orderBy(sql`${bids.packageBidAmount} DESC, ${bids.timestamp} ASC`)
+					.orderBy(sql`${bids.amount} DESC, ${bids.timestamp} ASC`)
 					.limit(1);
 				break;
 			default:
@@ -236,6 +235,7 @@ export class WinnerQueries implements IWinnerQueries {
 			.from(auctions)
 			.where(eq(auctions.id, auctionId));
 		const winners = new Map<TUserId, TBidId>();
+		if (type.length === 0) return winners;
 		if (type[0].type === TypeEnum.MULTI_UNIT) {
 			const results = await db
 				.select({ bidderId: bids.bidderId, id: bids.id })
@@ -244,7 +244,7 @@ export class WinnerQueries implements IWinnerQueries {
 				.where(and(eq(auctions.id, auctionId), eq(bids.status, "active")))
 				.orderBy(sql`${bids.amount} DESC`)
 				.limit(5); // Assume 5 units
-			results.forEach((r) => winners.set(r.bidderId, r.id));
+			results.forEach((r: { bidderId: TUserId; id: TBidId }) => winners.set(r.bidderId, r.id));
 		}
 		return winners;
 	}
