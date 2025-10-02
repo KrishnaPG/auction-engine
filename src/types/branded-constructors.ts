@@ -1,3 +1,6 @@
+// Generic brand function for zero-copy branded primitives
+export const brand = <T>(value: any): T => value as T;
+
 // Type-Safe Constructor Functions for Branded Types
 
 import type {

@@ -73,7 +73,7 @@ export interface IDatabaseAdapter {
 
 	// Query Operations
 	query<T = any>(sql: string, params?: readonly any[]): Promise<readonly T[]>;
-	queryOne<T = any>(sql: string, params?: readonly any[]): Promise<T | null>;
+	queryOne<T = any>(sql: string, params?: readonly any[]): Promise<T | undefined | null>;
 	queryValue<T = any>(sql: string, params?: readonly any[]): Promise<T>;
 
 	// Transaction Management
@@ -91,11 +91,16 @@ export interface IDatabaseAdapter {
 
 	// Configuration
 	getConfig(): DatabaseConfiguration;
+
+	// Drizzle-specific (optional for other adapters)
+	getDrizzle?(): ReturnType<typeof import("drizzle-orm/node-postgres").drizzle>;
 }
 
 export interface ITransaction {
-	query<T = any>(sql: string, params?: readonly any[]): Promise<readonly T[]>;
+	query<T = any>(sql: string, params?: readonly any[]): Promise<T[]>;
 	queryOne<T = any>(sql: string, params?: readonly any[]): Promise<T | null>;
+	insert(table: any): { values(data: any): Promise<any> };
+	update(table: any): { set(data: any): { where(condition: any): Promise<void> } };
 	commit(): Promise<void>;
 	rollback(): Promise<void>;
 	isActive(): boolean;

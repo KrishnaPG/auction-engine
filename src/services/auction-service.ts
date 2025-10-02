@@ -103,7 +103,7 @@ export class AuctionService implements IAuctionService {
 			// Determine winner
 			const type = await this.auctionQueries.getType(id); // Assume method
 			const winnerId = await this.winnerQueries.determineWinner(tx, id, type);
-			const finalPrice = await this.auctionQueries.getCurrentPrice(tx, id);
+			const finalPrice = await this.auctionQueries.getCurrentPrice(id, type);
 
 			// Outbox
 			await tx.insert(outbox).values({

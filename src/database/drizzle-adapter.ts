@@ -20,12 +20,15 @@ export class DrizzleAdapter
 	extends BaseDatabaseAdapter
 	implements IDatabaseAdapter
 {
-	private db?: ReturnType<typeof drizzle>;
-	private connectionCount: number = 0;
+	public db?: ReturnType<typeof drizzle>;
 
-	constructor(config: DatabaseConfiguration) {
-		super(config);
+	getDrizzle(): ReturnType<typeof drizzle> {
+		if (!this.db) {
+			throw new Error("Database not connected");
+		}
+		return this.db;
 	}
+	private connectionCount: number = 0;
 
 	public async connect(): Promise<void> {
 		try {
@@ -68,7 +71,7 @@ export class DrizzleAdapter
 	public async query<T = any>(
 		sql: string,
 		params?: readonly any[],
-	): Promise<readonly T[]> {
+	): Promise<T[]> {
 		this.validateSQL(sql);
 
 		if (!this.db || !this.connected) {
@@ -108,7 +111,7 @@ export class DrizzleAdapter
 		params?: readonly any[],
 	): Promise<T | null> {
 		const results = await this.query<T>(sql, params);
-		return results.length > 0 ? results[0] : null;
+		return results.length > 0 ? results[0]! : null;
 	}
 
 	public async queryValue<T = any>(
@@ -150,7 +153,7 @@ export class DrizzleAdapter
 		}
 	}
 
-	public async migrate(): Promise<void> {
+	public override async migrate(): Promise<void> {
 		if (!this.db) {
 			throw new Error("Database not connected");
 		}
@@ -162,7 +165,7 @@ export class DrizzleAdapter
 		);
 	}
 
-	public async rollback(steps: number): Promise<void> {
+	public override async rollback(steps: number): Promise<void> {
 		if (!this.db) {
 			throw new Error("Database not connected");
 		}
@@ -266,7 +269,7 @@ class DrizzleTransaction extends BaseTransaction {
 	public async query<T = any>(
 		sql: string,
 		params?: readonly any[],
-	): Promise<readonly T[]> {
+	): Promise<T[]> {
 		this.validateActive();
 
 		try {
@@ -291,7 +294,26 @@ class DrizzleTransaction extends BaseTransaction {
 		params?: readonly any[],
 	): Promise<T | null> {
 		const results = await this.query<T>(sql, params);
-		return results.length > 0 ? results[0] : null;
+		return results.length > 0 ? results[0]! : null;
+	}
+
+	public insert(table: any): { values(data: any): Promise<any> } {
+		return {
+			values: async (data: any) => {
+				// Implement insert logic using Drizzle
+				return await this.db.insert(table).values(data).returning();
+			},
+		};
+	}
+
+	public update(table: any): { set(data: any): { where(condition: any): Promise<void> } } {
+		return {
+			set: (data: any) => ({
+				where: async (condition: any) => {
+					await this.db.update(table).set(data).where(condition);
+				},
+			}),
+		};
 	}
 
 	public async commit(): Promise<void> {
@@ -385,7 +407,7 @@ export class DrizzleTable<T extends Record<string, any>> {
  */
 export class DrizzleQueryBuilder<T extends Record<string, any>> {
 	private queryType: "select" | "insert" | "update" | "delete" = "select";
-	private tableName: string;
+	private tableName!: string;
 	private selectedFields: string[] = [];
 	private conditions: string[] = [];
 	private values: Record<string, any> = {};

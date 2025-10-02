@@ -1,3 +1,5 @@
+import type { Money } from "./core-interfaces";
+
 // Base Branded Type Framework
 export declare const __brand: unique symbol;
 
@@ -18,9 +20,9 @@ export type Branded<Base, Tag extends string> =
 // Core Domain Branded Types
 
 // Monetary Values
-export type TBidAmount = Branded<number, "BidAmount">;
-export type TReservePrice = Branded<number, "ReservePrice">;
-export type TStartingPrice = Branded<number, "StartingPrice">;
+export type TBidAmount = Money;
+export type TReservePrice = Branded<Money, "ReservePrice">;
+export type TStartingPrice = Branded<Money, "StartingPrice">;
 export type TMinimumIncrement = Branded<number, "MinimumIncrement">;
 export type TBuyItNowPrice = Branded<number, "BuyItNowPrice">;
 export type TPennyBidFee = Branded<number, "PennyBidFee">;

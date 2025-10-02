@@ -5,14 +5,13 @@ export type {
 	TAuctionId,
 	TAuctionStartTime,
 	TBidAmount,
+	TBidId,
 	TCurrentPrice,
 	TIdempotencyKey,
 	TMinimumIncrement,
 	TTimestamp,
 	TUserId,
 } from "./branded-types";
-
-export type Tx = ITransaction;
 
 import type {
 	TApprovalState,
@@ -35,6 +34,8 @@ import type {
 	TUserId,
 	TValidationStatus,
 } from "./branded-types";
+
+export type Tx = ITransaction;
 
 // Enums for auction system
 export enum AuctionType {
@@ -90,35 +91,35 @@ export enum AccountStatus {
 // Value Objects (Branded/Thin)
 export class Money {
 	constructor(
-		public readonly amount: number,
+		public readonly value: number,
 		public readonly currency: TCurrency,
 	) {}
 	static fromDb(dbValue: { amount: number; currency: string }): Money {
 		return new Money(dbValue.amount, dbValue.currency as TCurrency);
 	}
 	add(other: Money): Money {
-		return new Money(this.amount + other.amount, this.currency);
+		return new Money(this.value + other.value, this.currency);
 	}
 	subtract(other: Money): Money {
-		return new Money(this.amount - other.amount, this.currency);
+		return new Money(this.value - other.value, this.currency);
 	}
 	multiply(factor: number): Money {
-		return new Money(this.amount * factor, this.currency);
+		return new Money(this.value * factor, this.currency);
 	}
 	isGreaterThan(other: Money): boolean {
-		return this.amount > other.amount;
+		return this.value > other.value;
 	}
 	isLessThan(other: Money): boolean {
-		return this.amount < other.amount;
+		return this.value < other.value;
 	}
 	isEqualTo(other: Money): boolean {
-		return this.amount === other.amount && this.currency === other.currency;
+		return this.value === other.value && this.currency === other.currency;
 	}
 	toCents(): number {
-		return Math.round(this.amount * 100);
+		return Math.round(this.value * 100);
 	}
-	toDollars(): number {
-		return this.amount;
+	toValue(): number {
+		return this.value;
 	}
 }
 
@@ -289,12 +290,13 @@ export interface IAuctionQueries {
 }
 
 export interface IBidQueries {
-	placeBid(req: PlaceBidRequest): Promise<TBidId>; // Idempotency SELECT, INSERT (tx)
+	placeBid(tx: Tx, req: PlaceBidRequest): Promise<TBidId>; // Idempotency SELECT, INSERT (tx)
 	getBidsByAuction(auctionId: TAuctionId): Promise<BidData[]>;
 	getWinningBids(auctionId: TAuctionId): Promise<BidData[]>; // ROW_NUMBER ORDER BY amount DESC
 	getByIdempotency(key: TIdempotencyKey): Promise<BidData | null>;
 	retractBid(bidId: TBidId): Promise<void>; // UPDATE status
 	findBidsByBidder(bidderId: TUserId): Promise<BidData[]>;
+	getBidData(bidId: TBidId): Promise<BidData | null>;
 }
 
 export interface IWinnerQueries {
@@ -309,7 +311,6 @@ export interface IUserQueries {
 	getUserData(id: TUserId): Promise<UserData | null>;
 	findByUsername(username: string): Promise<UserData | null>;
 	findActiveUsers(): Promise<UserData[]>;
-}
 }
 
 // Query Specification Pattern
@@ -384,7 +385,7 @@ export interface IDatabaseAdapter {
 	disconnect(): Promise<void>;
 	isConnected(): boolean;
 
-	query<T = any>(sql: string, params?: any[]): Promise<T[]>;
+	query<T = any>(sql: string, params?: readonly any[]): Promise<T[]>;
 	queryOne<T = any>(sql: string, params?: any[]): Promise<T | null>;
 	queryValue<T = any>(sql: string, params?: any[]): Promise<T>;
 
@@ -399,8 +400,10 @@ export interface IDatabaseAdapter {
 }
 
 export interface ITransaction {
-	query<T = any>(sql: string, params?: any[]): Promise<T[]>;
-	queryOne<T = any>(sql: string, params?: any[]): Promise<T | null>;
+	query<T = any>(sql: string, params?: readonly any[]): Promise<T[]>;
+	queryOne<T = any>(sql: string, params?: readonly any[]): Promise<T | null>;
+	insert(table: any): { values(data: any): Promise<any> };
+	update(table: any): { set(data: any): { where(condition: any): Promise<void> } };
 	commit(): Promise<void>;
 	rollback(): Promise<void>;
 	isActive(): boolean;
