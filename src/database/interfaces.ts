@@ -52,6 +52,18 @@ export type DatabaseConfiguration =
 	| MySQLConfig
 	| SQLiteConfig;
 
+// Outbox Repository for events
+export interface IOutboxRepository {
+	saveEvent(event: {
+		type: string;
+		payload: any;
+		idempotencyKey?: string;
+		timestamp: TTimestamp;
+	}): Promise<void>;
+
+	findByIdempotency(key: string): Promise<any | null>;
+}
+
 // Core Database Interfaces
 
 export interface IDatabaseAdapter {

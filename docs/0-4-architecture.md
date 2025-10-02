@@ -2,990 +2,818 @@
 
 ## Overview
 
-This document presents a comprehensive architectural layers design for the auction engine, implementing SOLID principles with clean separation of concerns. The architecture supports 13 auction types across multiple databases, API interfaces, and notification mechanisms while maintaining high cohesion and low coupling between layers.
+This document presents a revised architectural layers design for the auction engine, adopting a thin, high-performance DB wrapper approach. The database serves as the single source of truth, with all storage, state management, and computations (e.g., winner determination, current prices, bids) offloaded to SQL queries, views, and stored procedures via Drizzle ORM. This eliminates in-memory entities, factories, hydration layers, and stateful components, focusing on stateless query builders, direct DB abstractions, and indexed SQL for zero-copy performance. The design aligns with PRD principles: no in-memory state, DB-centric reliability, performance via indexing (see docs/0-2-indexing-strategy-performance.md), and SQL-based winner determination (see docs/0-3-winner-determination-sql-queries.md).
 
-## 1. Domain Layer - Core Business Entities
+The architecture supports 13 auction types across multiple databases, API interfaces, and notification mechanisms while maintaining high cohesion and low coupling between layers.
+
+## 1. Domain Layer - Query Interfaces and Branded Types
 
 ### Purpose and Responsibility
-The Domain Layer contains the core business entities and rules that represent the fundamental concepts of the auction domain. This layer is independent of external concerns like databases, APIs, or infrastructure.
+The Domain Layer defines type-safe interfaces for stateless query operations and branded types for data integrity. All business logic (e.g., status determination, pricing, winner selection) is offloaded to SQL queries/views/stored procedures in the database, ensuring the DB as single source of truth. No rich domain entities or in-memory state; results are plain objects mapped via Drizzle ORM for zero-copy performance.
 
-### Core Entities
+### Branded Types and Data Objects
+Use branded types for all IDs, amounts, and statuses to enforce type safety without runtime overhead (see docs/0-7-branded-types.md).
 
-#### Auction Aggregate Root
 ```typescript
-interface IAuction {
-  // Identity & Status
-  getId(): string;
-  getStatus(): AuctionStatus;
-  getVersion(): number;
+import { Brand } from '../types/branded-types';
 
-  // Core Properties
-  getTitle(): string;
-  getDescription(): string;
-  getType(): AuctionType;
-  getStartTime(): Date;
-  getEndTime(): Date;
+// Branded primitives
+export type TAuctionId = Brand<string, 'AuctionId'>;
+export type TBidId = Brand<string, 'BidId'>;
+export type TUserId = Brand<string, 'UserId'>;
+export type Money = Brand<number, 'Money'>; // e.g., Brand<bigint, 'Money'> for precision
 
-  // Pricing
-  getStartingPrice(): Money;
-  getCurrentPrice(): Money;
-  getReservePrice(): Money;
-  getMinBidIncrement(): Money;
-
-  // Business Rules
-  canPlaceBid(bid: IBid): boolean;
-  canEnd(): boolean;
-  canExtend(): boolean;
-
-  // State Changes
-  placeBid(bid: IBid): void;
-  end(): void;
-  extend(duration: number): void;
-  cancel(reason: string): void;
-}
-```
-
-#### Bid Entity
-```typescript
-interface IBid {
-  getId(): string;
-  getAuctionId(): string;
-  getBidderId(): string;
-  getAmount(): Money;
-  getTimestamp(): Date;
-  getStatus(): BidStatus;
-  isWinning(): boolean;
-  retract(): void;
-}
-```
-
-#### User Entity
-```typescript
-interface IUser {
-  getId(): string;
-  getUsername(): string;
-  getEmail(): string;
-  getRoles(): UserRole[];
-  canParticipateInAuction(auction: IAuction): boolean;
-  hasPermission(permission: string): boolean;
-}
-```
-
-### Value Objects
-```typescript
-// Immutable value objects for domain concepts
-class Money {
-  constructor(private amount: number, private currency: string) {}
-  add(other: Money): Money;
-  subtract(other: Money): Money;
-  isGreaterThan(other: Money): boolean;
+// Plain data objects (POJOs) from DB rows
+export interface AuctionData {
+  id: TAuctionId;
+  title: string;
+  description: string;
+  type: AuctionType; // string enum
+  startTime: Date;
+  endTime: Date;
+  startingPrice: Money;
+  reservePrice?: Money;
+  minIncrement: Money;
+  status: AuctionStatus; // Computed via SQL CASE
+  version: number; // For optimistic locking
 }
 
-class AuctionType {
-  static ENGLISH = new AuctionType('english', 'English Auction');
-  static DUTCH = new AuctionType('dutch', 'Dutch Auction');
-  // ... all 13 auction types
+export interface BidData {
+  id: TBidId;
+  auctionId: TAuctionId;
+  bidderId: TUserId;
+  amount: Money;
+  timestamp: Date;
+  status: BidStatus;
+  isWinning: boolean; // Computed via SQL window function
 }
 
-enum AuctionStatus {
+export interface UserData {
+  id: TUserId;
+  username: string;
+  email: string;
+  roles: UserRole[];
+}
+
+// Enums (DB-mapped)
+export enum AuctionType {
+  ENGLISH = 'english',
+  DUTCH = 'dutch',
+  // ... all 13 types from PRD
+}
+
+export enum AuctionStatus {
   DRAFT = 'draft',
-  SCHEDULED = 'scheduled',
   ACTIVE = 'active',
-  PAUSED = 'paused',
-  COMPLETED = 'completed',
-  CANCELLED = 'cancelled',
-  SUSPENDED = 'suspended'
+  // ... computed via SQL: CASE WHEN NOW() < start_time THEN 'scheduled' WHEN NOW() > end_time THEN 'completed' ELSE 'active' END
 }
 ```
 
-### Domain Services
+### Query Interfaces
+Stateless interfaces for DB queries, implemented via Drizzle abstractions. All methods are async, parameterized, and return plain data.
+
 ```typescript
-interface IAuctionFactory {
-  createAuction(type: AuctionType, config: AuctionConfig): IAuction;
-  recreateAuction(id: string, snapshot: AuctionSnapshot): IAuction;
+// Core auction queries
+export interface IAuctionQueries {
+  getAuctionData(id: TAuctionId): Promise<AuctionData | null>; // SELECT * FROM auctions WHERE id = ?
+  getCurrentPrice(id: TAuctionId): Promise<Money>; // SELECT COALESCE(MAX(b.amount), a.starting_price) FROM auctions a LEFT JOIN bids b ON a.id = b.auction_id WHERE a.id = ?
+  getStatus(id: TAuctionId): Promise<AuctionStatus>; // CASE on timestamps/bids count
+  canPlaceBid(auctionId: TAuctionId, amount: Money): Promise<boolean>; // Check status, amount > current_price + increment, etc., via SQL
+  createAuction(config: CreateAuctionConfig): Promise<TAuctionId>; // INSERT INTO auctions ... RETURNING id (in tx)
+  updateAuction(id: TAuctionId, updates: Partial<AuctionData>): Promise<void>; // UPDATE ... WHERE id = ?
 }
 
-interface IWinnerDeterminationService {
-  determineWinner(auction: IAuction): IUser | null;
-  determineWinnersForMultiUnit(auction: IAuction): Map<IUser, number>;
-  determineWinnersForCombinatorial(auction: IAuction): Map<IUser, string[]>;
+// Bid queries
+export interface IBidQueries {
+  placeBid(req: PlaceBidRequest): Promise<TBidId>; // Idempotency check SELECT, then INSERT ... RETURNING id (in tx)
+  getBidsByAuction(auctionId: TAuctionId): Promise<BidData[]>;
+  getWinningBids(auctionId: TAuctionId): Promise<BidData[]>; // Using ROW_NUMBER() OVER (ORDER BY amount DESC)
+  retractBid(bidId: TBidId): Promise<void>; // UPDATE status = 'retracted' WHERE id = ?
+}
+
+// Winner determination (offloaded to SQL per auction type)
+export interface IWinnerQueries {
+  determineWinner(auctionId: TAuctionId, type: AuctionType): Promise<UserData | null>; // Parameterized SQL from docs/0-3-winner-determination-sql-queries.md, e.g., for English: SELECT bidder_id FROM (SELECT *, ROW_NUMBER() OVER (ORDER BY amount DESC) rn FROM bids WHERE auction_id = ? AND status = 'active') WHERE rn = 1
+  determineWinnersMultiUnit(auctionId: TAuctionId, units: number): Promise<Map<TUserId, number>>; // SQL with LATERAL or aggregates
+  // Supports all 13 types via CASE or type-parameterized views
+}
+
+// Value Objects (thin, DB-mapped)
+export class Money {
+  constructor(public readonly amount: number, public readonly currency: string) {}
+  static fromDb(value: {amount: number; currency: string}): Money { return new Money(value.amount, value.currency); }
+  add(other: Money): Money { return new Money(this.amount + other.amount, this.currency); }
+  isGreaterThan(other: Money): boolean { return this.amount > other.amount; }
 }
 ```
 
-### SOLID Principles Compliance
-
-**Single Responsibility Principle (SRP)**: Each entity has one reason to change - Auction manages auction lifecycle, Bid manages bid operations, User manages user permissions.
-
-**Open/Closed Principle (OCP)**: New auction types can be added by implementing IAuction without modifying existing auction types.
-
-**Liskov Substitution Principle (LSP)**: All auction type implementations are substitutable for IAuction interface.
-
-**Interface Segregation Principle (ISP)**: Domain interfaces are focused - IAuction for auction operations, IBidProcessor for bid handling, IWinnerDeterminer for winner logic.
-
-**Dependency Inversion Principle (DIP)**: Domain layer depends only on abstractions, not concrete implementations.
+No factories, rehydrators, or aggregates: All state is DB-resident; queries are executed on-demand.
 
 ### Testing Strategy
-- **Unit Tests**: Test domain entities and value objects in isolation
-- **Domain Service Tests**: Mock-free tests for domain services
-- **Business Rule Tests**: Specification tests for complex business rules
-- **Edge Case Testing**: Boundary conditions and error scenarios
+- **Type Tests**: Ensure branded types prevent invalid inputs (TypeScript compile-time).
+- **Query Unit Tests**: Mock Drizzle/DB with sql-template-strings or jest mocks for SQL validation (e.g., test getCurrentPrice returns MAX bid).
+- **SQL Integration Tests**: Use real DB (Testcontainers) to verify queries against schemas/indexes (docs/0-2-indexing-strategy-performance.md).
+- **Edge Cases**: Test zero bids (fallback to starting_price), invalid types, concurrency (tx isolation).
+- **Performance**: Benchmark zero-copy mapping with Drizzle rowToObject.
 
-## 2. Repository Layer - Data Access Patterns
+## 2. Query Access Patterns - Direct DB Abstractions
 
 ### Purpose and Responsibility
-The Repository Layer provides a unified interface for data access operations, abstracting the underlying data storage mechanisms and providing domain-centric queries.
+With the stateless query approach, traditional repositories are eliminated. Data access is handled directly via Drizzle ORM query builders in dedicated query modules (e.g., src/database/queries/auction-queries.ts). This avoids entity mapping overhead, leveraging DB indexes and SQL for all filtering/sorting/pagination. Optional QueryCriteria supports dynamic/ad-hoc queries where fixed methods aren't sufficient.
 
-### Repository Interfaces
+### QueryCriteria for Dynamic Access
+For flexible searches (e.g., auctions by custom filters), use a lightweight criteria builder that translates to Drizzle SQL.
 
-#### Generic Repository Pattern
-```typescript
-interface IRepository<T, TId> {
-  findById(id: TId): Promise<T | null>;
-  findAll(criteria?: QueryCriteria): Promise<T[]>;
-  save(entity: T): Promise<T>;
-  saveAll(entities: T[]): Promise<T[]>;
-  delete(id: TId): Promise<boolean>;
-  deleteByCriteria(criteria: QueryCriteria): Promise<number>;
-  exists(id: TId): Promise<boolean>;
-  count(criteria?: QueryCriteria): Promise<number>;
-}
-```
-
-#### Domain-Specific Repositories
-```typescript
-interface IAuctionRepository extends IRepository<IAuction, string> {
-  findActiveAuctions(): Promise<IAuction[]>;
-  findAuctionsByType(type: AuctionType): Promise<IAuction[]>;
-  findAuctionsByStatus(status: AuctionStatus): Promise<IAuction[]>;
-  findAuctionsEndingSoon(minutes: number): Promise<IAuction[]>;
-  findAuctionsByBidder(bidderId: string): Promise<IAuction[]>;
-  findAuctionsByPriceRange(minPrice: Money, maxPrice: Money): Promise<IAuction[]>;
-}
-
-interface IBidRepository extends IRepository<IBid, string> {
-  findBidsByAuction(auctionId: string): Promise<IBid[]>;
-  findBidsByBidder(bidderId: string): Promise<IBid[]>;
-  findWinningBidsByAuction(auctionId: string): Promise<IBid[]>;
-  findHighestBidByAuction(auctionId: string): Promise<IBid | null>;
-  findBidsInTimeRange(startTime: Date, endTime: Date): Promise<IBid[]>;
-}
-```
-
-### Query Specification Pattern
 ```typescript
 interface QueryCriteria {
-  filters?: QueryFilter[];
-  sortBy?: SortCriteria[];
-  pagination?: PaginationOptions;
-  includes?: string[];
+  filters?: QueryFilter[]; // e.g., [{field: 'status', operator: 'equals', value: 'active'}]
+  sortBy?: SortCriteria[]; // e.g., [{field: 'endTime', direction: 'ASC'}]
+  pagination?: { limit: number; offset: number };
+  // No 'includes' - use SQL JOINs for relations
 }
 
 interface QueryFilter {
   field: string;
-  operator: 'equals' | 'not_equals' | 'greater_than' | 'less_than' | 'contains' | 'in';
+  operator: 'eq' | 'neq' | 'gt' | 'lt' | 'like' | 'in';
   value: any;
 }
-```
 
-### Repository Implementations
-```typescript
-class AuctionRepository implements IAuctionRepository {
-  constructor(private databaseAdapter: IDatabaseAdapter) {}
+interface SortCriteria {
+  field: string;
+  direction: 'ASC' | 'DESC';
+}
 
-  async findById(id: string): Promise<IAuction | null> {
-    const auctionData = await this.databaseAdapter.queryOne(
-      'SELECT * FROM auctions WHERE auction_id = $1',
-      [id]
-    );
-    return auctionData ? this.mapToDomain(auctionData) : null;
-  }
-
-  async findActiveAuctions(): Promise<IAuction[]> {
-    const auctionData = await this.databaseAdapter.query(
-      'SELECT * FROM auctions WHERE status = $1 ORDER BY end_time ASC',
-      [AuctionStatus.ACTIVE]
-    );
-    return auctionData.map(data => this.mapToDomain(data));
-  }
-
-  private mapToDomain(data: any): IAuction {
-    // Map database record to domain entity
-    return new AuctionEntity(data);
-  }
+// Usage in query interface (extended)
+export interface IAuctionQueries {
+  // ... previous methods
+  findAuctions(criteria?: QueryCriteria): Promise<AuctionData[]>; // Drizzle: db.select().from(auctions).where(buildWhere(criteria)).orderBy(buildOrder(criteria)).limit(criteria?.pagination?.limit)
 }
 ```
 
-### SOLID Principles Compliance
+### Implementation via Drizzle
+Queries are built using Drizzle's type-safe API or raw SQL templates for complex logic (e.g., winner determination). No domain mapping; direct row-to-POJO via Drizzle's zero-copy hydration. Try to keep the field names consistent between the database and Typescript so as to avoid explicit marshalling between database fields and Typescript objects.
 
-**Single Responsibility Principle (SRP)**: Each repository handles one aggregate type and its associated queries.
+```typescript
+// Example in auction-queries.ts
+import { db } from '../drizzle-adapter';
+import { sql } from 'drizzle-orm';
+import { auctions, bids } from '../schema'; // Drizzle schema
 
-**Open/Closed Principle (OCP)**: New query methods can be added without modifying existing repository interfaces.
+export class AuctionQueries implements IAuctionQueries {
+  async getCurrentPrice(id: TAuctionId): Promise<Money> {
+    const result = await db
+      .select({ maxAmount: sql<number>`COALESCE(MAX(${bids.amount}), ${auctions.startingPrice})` })
+      .from(auctions)
+      .leftJoin(bids, eq(bids.auctionId, auctions.id))
+      .where(eq(auctions.id, id))
+      .execute();
+    return Money.fromDb({ amount: result[0].maxAmount, currency: 'USD' });
+  }
 
-**Liskov Substitution Principle (LSP)**: All repository implementations are substitutable for their interfaces.
+  async findAuctions(criteria?: QueryCriteria): Promise<AuctionData[]> {
+    let query = db.select().from(auctions);
+    if (criteria?.filters) {
+      // Build dynamic WHERE with Drizzle conditions
+      criteria.filters.forEach(f => {
+        switch (f.operator) {
+          case 'eq': query = query.where(eq(sql`${f.field}`, f.value)); break;
+          // ... other operators
+        }
+      });
+    }
+    if (criteria?.sortBy) {
+      // Apply ORDER BY
+    }
+    if (criteria?.pagination) {
+      query = query.limit(criteria.pagination.limit).offset(criteria.pagination.offset);
+    }
+    return query.execute(); // Returns AuctionData[] directly
+  }
 
-**Interface Segregation Principle (ISP)**: Domain-specific repositories provide only relevant methods for each aggregate.
+  // Leverage indexes: e.g., for findActiveAuctions, use idx_auctions_status_endtime
+}
+```
 
-**Dependency Inversion Principle (DIP)**: Repositories depend on database abstractions, not concrete implementations.
+All access is stateless: Inject Drizzle instance or use global db; execute per request.
 
 ### Testing Strategy
-- **Repository Unit Tests**: Test repository logic with mocked database adapters
-- **Integration Tests**: Test repositories with actual database instances
-- **Query Performance Tests**: Validate query execution plans and performance
-- **Data Mapping Tests**: Ensure correct mapping between database and domain models
+- **Query Unit Tests**: Mock Drizzle with vi.mock('drizzle-orm') to test SQL generation and criteria translation.
+- **Integration Tests**: Run against test DB to validate results against expected SQL (use EXPLAIN ANALYZE for index usage).
+- **Performance Tests**: Benchmark query times with pgBadger or Drizzle's query logging; ensure <10ms for common ops via indexes (docs/0-2-indexing-strategy-performance.md).
+- **Dynamic Criteria Tests**: Verify filter/operator combinations produce correct SQL and handle edge cases (e.g., empty results, large offsets).
 
-## 3. Database Abstraction Layer - Multiple SQL Databases
+## 3. Database Layer - Drizzle ORM Abstraction
 
 ### Purpose and Responsibility
-The Database Abstraction Layer provides a unified interface for database operations across PostgreSQL, MySQL, and SQLite while handling connection management, transactions, and database-specific optimizations.
+The Database Layer uses Drizzle ORM as the primary abstraction for type-safe, performant SQL interactions across PostgreSQL (primary), MySQL, and SQLite. It handles schema definitions, query building, migrations, transactions, and connection pooling. All computations (e.g., aggregates, CASE logic) are in SQL; Drizzle enables zero-copy row mapping to branded POJOs. Outbox pattern via dedicated table for reliable event publishing.
 
-### Core Interfaces
+### Core Drizzle Integration
+Drizzle provides schema-based query builders, raw SQL templating, and dialect support for multi-DB.
 
-#### Database Adapter Interface
 ```typescript
-interface IDatabaseAdapter {
-  connect(): Promise<void>;
-  disconnect(): Promise<void>;
-  isConnected(): boolean;
+// src/database/drizzle-adapter.ts
+import { drizzle } from 'drizzle-orm/node-postgres'; // or mysql2, better-sqlite3
+import { Pool } from 'pg'; // Postgres example
+import * as schema from './schema'; // Drizzle schema files (auctions, bids, outbox)
 
-  // Query Operations
-  query<T = any>(sql: string, params?: any[]): Promise<T[]>;
-  queryOne<T = any>(sql: string, params?: any[]): Promise<T | null>;
-  queryValue<T = any>(sql: string, params?: any[]): Promise<T>;
+export const db = drizzle(new Pool({ connectionString: process.env.DATABASE_URL }), { schema });
 
-  // Transaction Management
-  beginTransaction(): Promise<ITransaction>;
-  executeInTransaction<T>(operation: (tx: ITransaction) => Promise<T>): Promise<T>;
-
-  // Schema Operations
-  migrate(): Promise<void>;
-  rollback(steps: number): Promise<void>;
-
-  // Health Check
-  healthCheck(): Promise<DatabaseHealth>;
+// Transaction helper
+export async function executeInTx<T>(fn: (tx: typeof db) => Promise<T>): Promise<T> {
+  return db.transaction(async (tx) => fn(tx));
 }
+
+// Prepared statements via Drizzle's caching
+const preparedGetCurrentPrice = db.prepare(sql`SELECT COALESCE(MAX(${bids.amount}), ${auctions.startingPrice}) AS price FROM ${auctions} LEFT JOIN ${bids} ON ${bids.auctionId} = ${auctions.id} WHERE ${auctions.id} = ${sql.placeholder('id')}`);
 ```
 
-#### Transaction Interface
-```typescript
-interface ITransaction {
-  query<T = any>(sql: string, params?: any[]): Promise<T[]>;
-  queryOne<T = any>(sql: string, params?: any[]): Promise<T | null>;
-  commit(): Promise<void>;
-  rollback(): Promise<void>;
-  isActive(): boolean;
-}
+### Outbox Table Schema
+For reliable notifications: DB table + poller/triggers. Schema (Postgres example):
+
+```sql
+CREATE TABLE outbox (
+  id SERIAL PRIMARY KEY,
+  event_type VARCHAR(50) NOT NULL, -- e.g., 'bid_placed', 'auction_ended'
+  auction_id TAUCTION_ID REFERENCES auctions(id),
+  payload JSONB NOT NULL, -- {bidId: '...', amount: 100, ...}
+  created_at TIMESTAMP DEFAULT NOW(),
+  processed_at TIMESTAMP,
+  attempts INTEGER DEFAULT 0,
+  INDEX idx_outbox_created (created_at),
+  INDEX idx_outbox_type (event_type)
+);
+
+-- Trigger for auto-insert (optional, for critical events)
+CREATE OR REPLACE FUNCTION insert_outbox_bid_placed() RETURNS TRIGGER AS $$
+BEGIN
+  INSERT INTO outbox (event_type, auction_id, payload) VALUES ('bid_placed', NEW.auction_id, jsonb_build_object('bidId', NEW.id, 'amount', NEW.amount));
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trig_outbox_bid_placed AFTER INSERT ON bids FOR EACH ROW EXECUTE FUNCTION insert_outbox_bid_placed();
 ```
 
-### Database-Specific Implementations
+### SQL Examples via Drizzle
+Direct query building for dynamics; leverage indexes (docs/0-2-indexing-strategy-performance.md).
 
-#### PostgreSQL Adapter
 ```typescript
-class PostgreSQLAdapter implements IDatabaseAdapter {
-  constructor(private config: PostgreSQLConfig) {}
+// Current price (aggregate, uses idx_bids_auction_amount)
+export async function getCurrentPrice(tx: typeof db, id: TAuctionId): Promise<Money> {
+  const [{ price }] = await tx
+    .select({ price: sql<number>`COALESCE(MAX(${bids.amount}), ${auctions.startingPrice})` })
+    .from(auctions)
+    .leftJoin(bids, eq(bids.auctionId, auctions.id))
+    .where(eq(auctions.id, id))
+    .groupBy(auctions.id, auctions.startingPrice);
+  return Money.fromDb({ amount: price, currency: 'USD' });
+}
 
-  async connect(): Promise<void> {
-    this.pool = new Pool({
-      connectionString: this.config.connectionString,
-      ssl: this.config.ssl,
-      ...this.config.poolOptions
-    });
-    await this.pool.query('SELECT 1');
+// Status (CASE logic, uses idx_auctions_times)
+export async function getAuctionStatus(tx: typeof db, id: TAuctionId): Promise<AuctionStatus> {
+  const [{ status }] = await tx
+    .select({
+      status: sql<AuctionStatus>`CASE
+        WHEN ${auctions.startTime} > NOW() THEN 'scheduled'
+        WHEN ${auctions.endTime} < NOW() THEN 'completed'
+        WHEN EXISTS(SELECT 1 FROM ${bids} WHERE ${bids.auctionId} = ${auctions.id} AND ${bids.status} = 'active') THEN 'active'
+        ELSE 'paused'
+      END`
+    })
+    .from(auctions)
+    .where(eq(auctions.id, id));
+  return status;
+}
+
+// Place bid (idempotency + tx + outbox, uses idx_bids_idempotency)
+export async function placeBid(tx: typeof db, req: PlaceBidRequest): Promise<TBidId> {
+  // Check idempotency
+  const existing = await tx.select().from(bids).where(eq(bids.idempotencyKey, req.idempotencyKey)).limit(1);
+  if (existing.length > 0) return existing[0].id;
+
+  // Validate via query (e.g., amount > current price)
+  const currentPrice = await getCurrentPrice(tx, req.auctionId);
+  if (req.amount <= currentPrice) throw new InvalidBidError();
+
+  // Insert bid + outbox in tx
+  const [newBid] = await tx
+    .insert(bids)
+    .values({ ...req, status: 'active' })
+    .returning({ id: bids.id });
+  await tx.insert(outbox).values({
+    event_type: 'bid_placed',
+    auction_id: req.auctionId,
+    payload: { bidId: newBid.id, amount: req.amount }
+  });
+  return newBid.id;
+}
+
+// Winner (parameterized by type, from docs/0-3-winner-determination-sql-queries.md)
+export async function determineWinner(tx: typeof db, auctionId: TAuctionId, type: AuctionType): Promise<TUserId | null> {
+  let query;
+  switch (type) {
+    case AuctionType.ENGLISH:
+      query = tx.select({ winner: bids.bidderId })
+        .from(bids)
+        .where(and(eq(bids.auctionId, auctionId), eq(bids.status, 'active')))
+        .orderBy(desc(bids.amount))
+        .limit(1);
+      break;
+    // ... other types: Dutch (min bid), Vickrey (2nd highest), etc., using ROW_NUMBER, LATERAL
+    default: throw new UnsupportedAuctionType(type);
   }
-
-  async query<T>(sql: string, params?: any[]): Promise<T[]> {
-    const client = await this.pool.connect();
-    try {
-      const result = await client.query(sql, params);
-      return result.rows as T[];
-    } finally {
-      client.release();
-    }
-  }
-
-  async executeInTransaction<T>(operation: (tx: ITransaction) => Promise<T>): Promise<T> {
-    const client = await this.pool.connect();
-    try {
-      await client.query('BEGIN');
-      const transaction = new PostgreSQLTransaction(client);
-      const result = await operation(transaction);
-      await transaction.commit();
-      return result;
-    } catch (error) {
-      await client.query('ROLLBACK');
-      throw error;
-    } finally {
-      client.release();
-    }
-  }
+  const [result] = await query;
+  return result?.winner ?? null;
 }
 ```
 
-#### MySQL Adapter
-```typescript
-class MySQLAdapter implements IDatabaseAdapter {
-  async query<T>(sql: string, params?: any[]): Promise<T[]> {
-    // MySQL-specific implementation with connection pooling
-    // Handle MySQL parameter placeholders (?)
-    // Implement MySQL-specific transaction handling
-  }
-}
-```
+### Multi-DB Support
+Drizzle dialects: Postgres (pg), MySQL (mysql2), SQLite (better-sqlite3). Adapter switches via config; schema migrations with Drizzle Kit.
 
-#### SQLite Adapter
-```typescript
-class SQLiteAdapter implements IDatabaseAdapter {
-  async query<T>(sql: string, params?: any[]): Promise<T[]> {
-    // SQLite-specific implementation
-    // Handle file-based database operations
-    // Implement SQLite-specific optimizations
-  }
-}
-```
+### Connection Pooling and Optimizations
+Use underlying driver pooling (e.g., pg.Pool); prepared statements via Drizzle's plan caching. Materialized views for complex computations (e.g., real-time prices: CREATE MATERIALIZED VIEW mv_current_prices AS SELECT auction_id, MAX(amount) AS price FROM bids GROUP BY auction_id; REFRESH every 1s via cron).
 
-### Connection Pool Management
-```typescript
-interface ConnectionPoolConfig {
-  min: number;
-  max: number;
-  acquireTimeout: number;
-  idleTimeout: number;
-  evictionInterval: number;
-}
-
-class ConnectionPool {
-  constructor(private config: ConnectionPoolConfig) {}
-
-  async getConnection(): Promise<DatabaseConnection>;
-  releaseConnection(connection: DatabaseConnection): void;
-  getPoolStats(): PoolStats;
-}
-```
 ### Testing Strategy
-- **Adapter Unit Tests**: Test each database adapter in isolation
-- **Connection Tests**: Validate connection management and pooling
-- **Transaction Tests**: Test transaction isolation and rollback scenarios
-- **Performance Tests**: Benchmark query performance across database types
-- **Migration Tests**: Test schema migration and rollback capabilities
-
-## 4. Service Layer - Business Logic Separation
+- **Drizzle Unit Tests**: Mock db with 'drizzle-orm' vi.mock; test query generation/SQL output.
+- **Schema Tests**: Validate Drizzle schema matches DB (drizzle-kit introspect).
+- **Transaction Tests**: Simulate tx with rollback; test outbox insert/commit.
+- **Integration Tests**: Use Testcontainers for Postgres/MySQL/SQLite; verify SQL results/index usage (EXPLAIN).
+- **Migration Tests**: Run drizzle-kit migrate/rollback; check outbox/triggers.
+- **Performance**: Benchmark with pg_stat_statements; ensure <5ms queries via indexes.
+## 4. Service Layer - Thin Orchestration
 
 ### Purpose and Responsibility
-The Service Layer contains application-specific business logic that orchestrates operations across multiple domain objects and repositories, implementing use cases and workflows.
+Services are thin wrappers: validate inputs (using branded types/validators), check idempotency/preconditions via queries, execute mutations in transactions (insert + outbox), and delegate reads to query modules. No domain entities or complex logic—offload to DB/SQL. Supports REST/gRPC/GraphQL via consistent interfaces.
 
 ### Service Interfaces
+Thin async methods mirroring use cases; use branded types for params/results.
 
-#### Application Services
 ```typescript
 interface IAuctionService {
-  createAuction(request: CreateAuctionRequest): Promise<IAuction>;
-  startAuction(auctionId: string): Promise<void>;
-  pauseAuction(auctionId: string, reason: string): Promise<void>;
-  resumeAuction(auctionId: string): Promise<void>;
-  endAuction(auctionId: string): Promise<AuctionResult>;
-  cancelAuction(auctionId: string, reason: string): Promise<void>;
-  extendAuction(auctionId: string, duration: number): Promise<void>;
+  createAuction(req: CreateAuctionRequest): Promise<TAuctionId>; // Validates, tx INSERT auctions + outbox 'auction_created'
+  getAuctionData(id: TAuctionId): Promise<AuctionData>; // Delegates to IAuctionQueries
+  endAuction(id: TAuctionId): Promise<AuctionResult>; // Query status, tx UPDATE status + outbox 'auction_ended' (triggers winner query)
+  extendAuction(id: TAuctionId, duration: number): Promise<void>; // tx UPDATE end_time + outbox
 }
 
 interface IBidService {
-  placeBid(request: PlaceBidRequest): Promise<IBid>;
-  retractBid(bidId: string, reason: string): Promise<void>;
-  validateBid(auctionId: string, bidAmount: Money): Promise<BidValidationResult>;
-  getBidHistory(auctionId: string): Promise<IBid[]>;
-  getUserBids(userId: string): Promise<IBid[]>;
+  placeBid(req: PlaceBidRequest): Promise<TBidId>; // Validate branded, idempotency query, tx INSERT bid + outbox 'bid_placed'
+  getCurrentPrice(id: TAuctionId): Promise<Money>; // Delegates to IAuctionQueries
+  validateBid(auctionId: TAuctionId, amount: Money): Promise<BidValidationResult>; // Query current_price, status, rules via SQL
+}
+
+// Requests with branded types + idempotency
+interface CreateAuctionRequest {
+  title: string;
+  type: AuctionType;
+  startingPrice: Money;
+  // ... other fields
+}
+
+interface PlaceBidRequest {
+  auctionId: TAuctionId;
+  bidderId: TUserId;
+  amount: Money;
+  idempotencyKey: string; // Checked via SELECT on bids.idempotency_key
 }
 ```
 
-#### Domain Services
+No separate domain/lifecycle services—embed simple orchestration in application services.
+
+### Implementation Patterns
+Services inject query modules and db; use tx for atomicity.
+
 ```typescript
-interface IAuctionLifecycleService {
-  processAuctionStart(auction: IAuction): Promise<void>;
-  processAuctionEnd(auction: IAuction): Promise<AuctionResult>;
-  processBidPlacement(auction: IAuction, bid: IBid): Promise<void>;
-  processAuctionExtension(auction: IAuction): Promise<void>;
-}
+// src/services/auction-service.ts
+import { auctionQueries } from '../database/queries/auction-queries';
+import { bidQueries } from '../database/queries/bid-queries';
+import { executeInTx } from '../database/drizzle-adapter';
+import { validateAuctionConfig } from '../business-rules/validators/auction-config-validator'; // Thin Zod/ branded validator
 
-interface INotificationService {
-  notifyBidPlaced(bid: IBid): Promise<void>;
-  notifyAuctionStarted(auction: IAuction): Promise<void>;
-  notifyAuctionEnded(auction: IAuction, result: AuctionResult): Promise<void>;
-  notifyOutbid(bidder: IUser, auction: IAuction): Promise<void>;
-}
-```
+export class AuctionService implements IAuctionService {
+  async createAuction(req: CreateAuctionRequest): Promise<TAuctionId> {
+    // Validate inputs (branded types + rules)
+    validateAuctionConfig(req); // Throws if invalid (e.g., startTime > endTime)
 
-### Service Implementation Patterns
+    return executeInTx(async (tx) => {
+      // Insert auction
+      const id = await auctionQueries.createAuction(tx, req);
 
-#### Use Case Coordination
-```typescript
-class AuctionService implements IAuctionService {
-  constructor(
-    private auctionRepository: IAuctionRepository,
-    private bidRepository: IBidRepository,
-    private notificationService: INotificationService,
-    private auctionLifecycleService: IAuctionLifecycleService
-  ) {}
+      // Outbox for notifications (e.g., 'auction_created')
+      await tx.insert(outbox).values({
+        event_type: 'auction_created',
+        payload: { auctionId: id, title: req.title }
+      });
 
-  async createAuction(request: CreateAuctionRequest): Promise<IAuction> {
-    // Validate request
-    const auction = this.auctionFactory.createAuction(request.type, request.config);
-
-    // Save to repository
-    const savedAuction = await this.auctionRepository.save(auction);
-
-    // Schedule auction if needed
-    if (request.scheduleForLater) {
-      await this.scheduleAuction(savedAuction);
-    }
-
-    return savedAuction;
+      return id;
+    });
   }
 
-  async endAuction(auctionId: string): Promise<AuctionResult> {
-    const auction = await this.auctionRepository.findById(auctionId);
-    if (!auction) {
-      throw new AuctionNotFoundError(auctionId);
-    }
+  async endAuction(id: TAuctionId): Promise<AuctionResult> {
+    const status = await auctionQueries.getStatus(id);
+    if (status !== 'active') throw new InvalidOperationError('Cannot end non-active auction');
 
-    // Use domain service for business logic
-    const result = await this.auctionLifecycleService.processAuctionEnd(auction);
+    return executeInTx(async (tx) => {
+      // Update status
+      await tx.update(auctions).set({ status: 'completed' }).where(eq(auctions.id, id));
 
-    // Update auction status
-    auction.end();
-    await this.auctionRepository.save(auction);
+      // Determine winner via query (offloaded to SQL)
+      const winnerId = await winnerQueries.determineWinner(tx, id, await auctionQueries.getType(id));
 
-    // Send notifications
-    await this.notificationService.notifyAuctionEnded(auction, result);
+      // Outbox events
+      await tx.insert(outbox).values({ event_type: 'auction_ended', payload: { auctionId: id, winnerId } });
 
-    return result;
+      return { winnerId, finalPrice: await auctionQueries.getCurrentPrice(tx, id) };
+    });
+  }
+}
+
+// src/services/bid-service.ts
+export class BidService implements IBidService {
+  async placeBid(req: PlaceBidRequest): Promise<TBidId> {
+    // Branded validation (compile-time + runtime coerce)
+    if (!isValidMoney(req.amount)) throw new InvalidAmountError();
+
+    return executeInTx(async (tx) => {
+      // Idempotency check
+      const existing = await bidQueries.getByIdempotency(tx, req.idempotencyKey);
+      if (existing) return existing.id;
+
+      // Preconditions via queries
+      const auctionData = await auctionQueries.getAuctionData(tx, req.auctionId);
+      const currentPrice = await auctionQueries.getCurrentPrice(tx, req.auctionId);
+      if (auctionData.status !== 'active' || req.amount <= currentPrice + auctionData.minIncrement) {
+        throw new InvalidBidError();
+      }
+
+      // Insert bid
+      const bidId = await bidQueries.placeBid(tx, req);
+
+      // Outbox (triggered or manual)
+      // await tx.insert(outbox).values({ event_type: 'bid_placed', payload: { bidId, auctionId: req.auctionId } });
+
+      return bidId;
+    });
+  }
+
+  async validateBid(auctionId: TAuctionId, amount: Money): Promise<BidValidationResult> {
+    // Delegate to query for rules (SQL: amount > MAX(bid) + increment, status=active)
+    const canPlace = await auctionQueries.canPlaceBid(auctionId, amount);
+    const currentPrice = await auctionQueries.getCurrentPrice(auctionId);
+    return { valid: canPlace, requiredMin: currentPrice + minIncrement(auctionId) };
   }
 }
 ```
+
+Services are stateless; instantiate per request or use DI.
 
 ### Testing Strategy
-- **Service Unit Tests**: Test business logic with mocked dependencies
-- **Integration Tests**: Test service interactions with real repositories
-- **Workflow Tests**: Test complete use case scenarios
-- **Error Handling Tests**: Test failure scenarios and error recovery
+- **Unit Tests**: Mock queries/tx; test validation, idempotency logic, error throws.
+- **Integration Tests**: Real DB tx; verify inserts/outbox, SQL preconditions (e.g., bid rejected if below min).
+- **Concurrency Tests**: Simulate parallel bids; test tx isolation (SERIALIZABLE for auctions).
+- **Idempotency Tests**: Replay same key; ensure no duplicates.
+- **Edge Cases**: Invalid brands, tx rollbacks on outbox failure.
 
-## 5. API Abstraction Layer - Multiple Interface Protocols
+### Stateless Query Pattern
+All operations follow: Validate input → Query precondition (SQL) → Tx mutation (INSERT/UPDATE + outbox) → Query result → Map response.
+
+This ensures zero in-memory state, DB reliability, and performance via indexes/MVs.
+
+```mermaid
+sequenceDiagram
+    participant API
+    participant Service
+    participant Query
+    participant DB
+    participant Outbox
+    API->>Service: placeBid(req)
+    Service->>Query: getCurrentPrice(id)
+    Query->>DB: SELECT MAX(bids.amount)
+    DB-->>Query: price
+    Query-->>Service: price
+    alt Valid
+        Service->>DB: Tx BEGIN
+        DB->>Outbox: INSERT bid
+        Outbox->>Outbox: INSERT event
+        DB-->>Service: Tx COMMIT
+    else Invalid
+        Service->>Service: Throw Error
+    end
+    Service-->>API: bidId
+    Note over Outbox,Poller: Later: Poll → Publish
+```
+
+## 5. API Layer - CRUD via Query Wrappers
 
 ### Purpose and Responsibility
-The API Abstraction Layer provides a unified interface for external communication across REST, gRPC, and GraphQL protocols while maintaining consistent request/response handling.
+Thin adapters for REST/gRPC/GraphQL map requests to services/queries, responses from data objects. Supports CRUD: createAuction → service INSERT, getAuction → query SELECT. No state; each call triggers DB execution.
 
 ### Core Interfaces
+Adapters initialize servers, register handlers delegating to services.
 
-#### API Adapter Interface
 ```typescript
 interface IAPIAdapter {
   initialize(config: APIConfig): Promise<void>;
-  registerRoutes(routes: RouteDefinition[]): Promise<void>;
+  registerHandler(method: string, path: string, handler: (req: any) => Promise<any>): void;
   start(): Promise<void>;
   stop(): Promise<void>;
-  getHealth(): Promise<APIHealth>;
 }
 ```
 
-#### Request/Response Abstractions
-```typescript
-interface IRequest {
-  getPath(): string;
-  getMethod(): HTTPMethod;
-  getHeaders(): Map<string, string>;
-  getBody(): any;
-  getParams(): Map<string, string>;
-  getQuery(): Map<string, string>;
-  getUser(): IUser | null;
-}
+### Protocol Implementations
+Thin wrappers; handlers call services with branded requests.
 
-interface IResponse {
-  setStatus(code: number): void;
-  setHeader(name: string, value: string): void;
-  setBody(data: any): void;
-  send(): void;
-}
-```
-
-### Protocol-Specific Implementations
-
-#### REST API Adapter
+#### REST (Fastify/Express)
 ```typescript
 class RESTAdapter implements IAPIAdapter {
-  constructor(private framework: 'express' | 'fastify') {}
-
-  async initialize(config: RESTConfig): Promise<void> {
-    this.app = this.createApp(this.framework);
-    this.setupMiddleware(config.middleware);
-    this.setupErrorHandling(config.errorHandler);
-  }
-
-  async registerRoutes(routes: RouteDefinition[]): Promise<void> {
-    for (const route of routes) {
-      this.app.route({
-        method: route.method,
-        path: route.path,
-        handler: this.wrapHandler(route.handler)
-      });
-    }
-  }
-
-  private wrapHandler(handler: RequestHandler): RequestHandler {
-    return async (req: any, res: any) => {
+  async registerHandler(method: 'POST', path: '/auctions', handler: (req: CreateAuctionRequest) => Promise<TAuctionId>) {
+    this.app.post('/auctions', async (req, reply) => {
       try {
-        const request = new ExpressRequest(req);
-        const response = new ExpressResponse(res);
-        await handler(request, response);
-      } catch (error) {
-        this.handleError(error, res);
-      }
-    };
+        const validatedReq = RequestMapper.mapToCreateAuctionRequest(req); // Coerce to branded
+        const id = await auctionService.createAuction(validatedReq);
+        reply.status(201).send(ResponseMapper.mapToAuctionResponse({ id })); // From data
+      } catch (err) { reply.status(400).send({ error: err.message }); }
+    });
   }
 }
 ```
 
-#### gRPC API Adapter
+#### gRPC
 ```typescript
 class GRPCAdapter implements IAPIAdapter {
-  async initialize(config: GRPCConfig): Promise<void> {
-    this.server = new grpc.Server();
-    this.loadProtoDefinitions(config.protoFiles);
-    this.setupInterceptors(config.interceptors);
-  }
-
-  async registerRoutes(routes: RouteDefinition[]): Promise<void> {
-    // Map REST-style routes to gRPC service definitions
-    for (const route of routes) {
-      this.registerGRPCHandler(route);
-    }
+  registerHandler(service: 'AuctionService', method: 'CreateAuction', handler: (req: CreateAuctionRequest) => Promise<TAuctionId>) {
+    this.server.addService(AuctionProto, {
+      createAuction: async (call, callback) => {
+        try {
+          const validatedReq = grpcToBranded(call.request); // Map protobuf to branded
+          const id = await auctionService.createAuction(validatedReq);
+          callback(null, { id: id.value }); // Branded to proto
+        } catch (err) { callback({ code: 3, message: err.message }); }
+      }
+    });
   }
 }
 ```
 
-#### GraphQL API Adapter
+#### GraphQL (Apollo)
 ```typescript
-class GraphQLAdapter implements IAPIAdapter {
-  async initialize(config: GraphQLConfig): Promise<void> {
-    this.schema = this.buildSchema(config.typeDefs);
-    this.resolvers = this.buildResolvers(config.resolvers);
-    this.setupDataLoaders(config.dataLoaders);
-  }
-
-  async registerRoutes(routes: RouteDefinition[]): Promise<void> {
-    // Register GraphQL schema and resolvers
-    this.setupGraphQLMiddleware();
-  }
-}
+const resolvers = {
+  Query: {
+    auction: async (_, { id }) => auctionQueries.getAuctionData(brand(id, 'AuctionId')),
+    currentPrice: async (_, { id }) => auctionService.getCurrentPrice(brand(id, 'AuctionId')),
+  },
+  Mutation: {
+    createAuction: async (_, args) => {
+      const req = validateGraphQL(args); // Branded coercion
+      return auctionService.createAuction(req);
+    },
+    placeBid: async (_, args) => bidService.placeBid(validateGraphQL(args)),
+  },
+};
 ```
 
 ### Request/Response Mapping
+Map to/from branded data objects; use Zod/validators for input.
+
 ```typescript
 class RequestMapper {
-  static mapToCreateAuctionRequest(req: IRequest): CreateAuctionRequest {
+  static mapToCreateAuctionRequest(body: any): CreateAuctionRequest {
     return {
-      title: req.getBody().title,
-      description: req.getBody().description,
-      type: req.getBody().type,
-      startingPrice: Money.from(req.getBody().startingPrice),
-      reservePrice: req.getBody().reservePrice ? Money.from(req.getBody().reservePrice) : null,
-      startTime: new Date(req.getBody().startTime),
-      endTime: new Date(req.getBody().endTime)
+      title: body.title,
+      type: AuctionType[body.type],
+      startingPrice: Money.from(body.startingPrice), // Branded constructor
+      // Coerce dates, validate
     };
   }
 }
 
 class ResponseMapper {
-  static mapAuctionToResponse(auction: IAuction): AuctionResponse {
+  static mapAuctionDataToResponse(data: AuctionData): AuctionResponse {
     return {
-      id: auction.getId(),
-      title: auction.getTitle(),
-      description: auction.getDescription(),
-      type: auction.getType().getValue(),
-      status: auction.getStatus(),
-      currentPrice: auction.getCurrentPrice().toObject(),
-      startTime: auction.getStartTime(),
-      endTime: auction.getEndTime()
+      id: data.id.value, // Unbrand for JSON
+      title: data.title,
+      status: data.status,
+      currentPrice: { amount: data.currentPrice.value, currency: 'USD' }, // From query
+      // No getters; direct from POJO
     };
   }
 }
 ```
-
-### SOLID Principles Compliance
-
-**Single Responsibility Principle (SRP)**: Each adapter handles one protocol's specific requirements.
-
-**Open/Closed Principle (OCP)**: New API protocols can be added without modifying existing adapters.
-
-**Liskov Substitution Principle (LSP)**: All API adapters implement IAPIAdapter and can be used interchangeably.
-
-**Interface Segregation Principle (ISP)**: API interfaces are focused on protocol-specific concerns.
-
-**Dependency Inversion Principle (DIP)**: API layer depends on service abstractions, not concrete implementations.
 
 ### Testing Strategy
-- **Adapter Unit Tests**: Test each API adapter with mocked frameworks
-- **Request/Response Tests**: Test mapping logic and data transformation
-- **Integration Tests**: Test API endpoints with real HTTP clients
-- **Performance Tests**: Test API throughput and response times
+- **Handler Tests**: Mock services; test mapping, validation errors.
+- **Protocol Tests**: Integration with real servers (Supertest for REST, @grpc/grpc-js for gRPC).
+- **Schema Tests**: GraphQL introspection, resolver delegation.
+- **Performance**: Load test endpoints; ensure <50ms response via DB indexes.
 
-## 6. Notification Abstraction Layer - Multiple Notification Mechanisms
+## 6. Notification Layer - DB Outbox Poller
 
 ### Purpose and Responsibility
-The Notification Abstraction Layer provides a unified interface for delivering notifications across WebSocket, SSE, Email, and SMS channels while handling real-time updates and message queuing.
+Notifications via DB outbox: Services insert events to outbox table in tx; dedicated poller (worker) queries unprocessed events every 100ms, publishes to pub/sub (Redis or Postgres LISTEN/NOTIFY), marks processed. Replay via DB query on reconnect. Supports WebSocket/SSE/Email/SMS adapters consuming from pub/sub. DB-first for reliability, no in-memory queues.
 
-### Core Interfaces
+### Outbox Poller Implementation
+Thin worker polls outbox, handles retries, pub/sub forwarding.
 
-#### Notification Adapter Interface
 ```typescript
-interface INotificationAdapter {
-  initialize(config: NotificationConfig): Promise<void>;
-  send(recipient: string, message: NotificationMessage): Promise<void>;
-  broadcast(event: string, data: any): Promise<void>;
-  subscribe(topic: string, handler: MessageHandler): Promise<void>;
-  unsubscribe(topic: string): Promise<void>;
-  getHealth(): Promise<NotificationHealth>;
-}
-```
+// src/notifications/outbox-poller.ts
+import { db } from '../database/drizzle-adapter';
+import { outbox } from '../schema';
+import Redis from 'ioredis'; // Or pg for NOTIFY
+import { WebSocketAdapter, EmailAdapter } from './adapters';
 
-#### Message Definitions
-```typescript
-interface NotificationMessage {
-  id: string;
-  type: NotificationType;
-  priority: NotificationPriority;
-  title: string;
-  content: string;
-  metadata?: Record<string, any>;
-  scheduledFor?: Date;
-  expiresAt?: Date;
-}
+const redis = new Redis(process.env.REDIS_URL);
+const adapters = { websocket: new WebSocketAdapter(), email: new EmailAdapter() };
 
-enum NotificationType {
-  AUCTION_STARTED = 'auction_started',
-  AUCTION_ENDED = 'auction_ended',
-  BID_PLACED = 'bid_placed',
-  OUTBID = 'outbid',
-  AUCTION_EXTENDED = 'auction_extended',
-  WINNER_ANNOUNCED = 'winner_announced'
-}
-```
+export class OutboxPoller {
+  private interval: NodeJS.Timeout;
 
-### Notification Implementations
+  async start(): Promise<void> {
+    // Initial replay if needed
+    await this.replayUnprocessed();
 
-#### WebSocket Adapter
-```typescript
-class WebSocketAdapter implements INotificationAdapter {
-  private connections: Map<string, WebSocketConnection> = new Map();
-
-  async initialize(config: WebSocketConfig): Promise<void> {
-    this.server = new WebSocket.Server({ port: config.port });
-    this.setupConnectionHandlers();
-    this.setupHeartbeat(config.heartbeatInterval);
-  }
-
-  async send(recipient: string, message: NotificationMessage): Promise<void> {
-    const connection = this.connections.get(recipient);
-    if (connection && connection.isAlive()) {
-      connection.send(JSON.stringify(message));
-    }
-  }
-
-  async broadcast(event: string, data: any): Promise<void> {
-    const message: NotificationMessage = {
-      id: generateId(),
-      type: NotificationType[event],
-      priority: NotificationPriority.NORMAL,
-      title: event,
-      content: JSON.stringify(data)
-    };
-
-    for (const connection of this.connections.values()) {
-      if (connection.isAlive()) {
-        connection.send(JSON.stringify(message));
-      }
-    }
-  }
-}
-```
-
-#### Email Adapter
-```typescript
-class EmailAdapter implements INotificationAdapter {
-  async send(recipient: string, message: NotificationMessage): Promise<void> {
-    const emailTemplate = this.getTemplate(message.type);
-    const emailContent = this.renderTemplate(emailTemplate, message);
-
-    await this.emailProvider.send({
-      to: recipient,
-      subject: message.title,
-      html: emailContent,
-      priority: this.mapPriority(message.priority)
-    });
-  }
-
-  async broadcast(event: string, data: any): Promise<void> {
-    // Email broadcasting typically goes to subscribed users
-    const subscribers = await this.getSubscribers(event);
-    const tasks = subscribers.map(user => this.send(user.email, {
-      id: generateId(),
-      type: NotificationType[event],
-      priority: NotificationPriority.NORMAL,
-      title: event,
-      content: JSON.stringify(data)
-    }));
-
-    await Promise.all(tasks);
-  }
-}
-```
-
-#### SMS Adapter
-```typescript
-class SMSAdapter implements INotificationAdapter {
-  async send(recipient: string, message: NotificationMessage): Promise<void> {
-    const smsContent = this.formatSMS(message);
-
-    await this.smsProvider.send({
-      to: recipient,
-      message: smsContent,
-      priority: this.mapPriority(message.priority)
-    });
-  }
-}
-```
-
-### Message Queue Integration
-```typescript
-interface IMessageQueue {
-  publish(topic: string, message: any): Promise<void>;
-  subscribe(topic: string, handler: MessageHandler): Promise<void>;
-  acknowledge(messageId: string): Promise<void>;
-  retry(messageId: string): Promise<void>;
-}
-
-class NotificationQueue {
-  constructor(private queue: IMessageQueue) {}
-
-  async enqueue(message: NotificationMessage): Promise<void> {
-    await this.queue.publish('notifications', message);
-  }
-
-  async processQueue(): Promise<void> {
-    await this.queue.subscribe('notifications', async (message) => {
+    this.interval = setInterval(async () => {
       try {
-        await this.deliverMessage(message);
-        await this.queue.acknowledge(message.id);
-      } catch (error) {
-        await this.queue.retry(message.id);
+        const unprocessed = await db
+          .select()
+          .from(outbox)
+          .where(isNull(outbox.processedAt))
+          .orderBy(outbox.createdAt)
+          .limit(100); // Batch
+
+        for (const event of unprocessed) {
+          await this.processEvent(event);
+        }
+      } catch (err) { console.error('Poller error:', err); }
+    }, 100); // 100ms poll
+  }
+
+  private async processEvent(event: OutboxEvent): Promise<void> {
+    try {
+      // Publish to pub/sub
+      await redis.publish(event.event_type, JSON.stringify(event.payload));
+
+      // Or Postgres NOTIFY: await db.execute(sql`NOTIFY ${event.event_type}, ${event.payload}`);
+
+      // Forward to adapters if direct (e.g., email)
+      if (event.event_type === 'auction_ended') {
+        await adapters.email.send('admin@example.com', { type: 'auction_ended', ...event.payload });
       }
+
+      // Mark processed (retry on fail)
+      await db.update(outbox)
+        .set({ processedAt: new Date(), attempts: event.attempts + 1 })
+        .where(eq(outbox.id, event.id));
+
+    } catch (err) {
+      // Increment attempts; exponential backoff or dead-letter
+      await db.update(outbox)
+        .set({ attempts: sql`${outbox.attempts} + 1` })
+        .where(eq(outbox.id, event.id));
+      if (event.attempts > 5) await this.moveToDeadLetter(event.id);
+    }
+  }
+
+  async replayUnprocessed(): Promise<void> {
+    // On worker restart: Query all unprocessed (or since last checkpoint)
+    const unprocessed = await db.select().from(outbox).where(isNull(outbox.processedAt));
+    for (const event of unprocessed) {
+      await this.processEvent(event); // Re-process
+    }
+  }
+
+  async stop(): Promise<void> {
+    clearInterval(this.interval);
+    await redis.quit();
+  }
+}
+
+// Event types from outbox
+interface OutboxEvent {
+  id: number;
+  event_type: string; // 'bid_placed', etc.
+  payload: any; // JSONB
+  created_at: Date;
+  processed_at: Date | null;
+  attempts: number;
+}
+```
+
+### Pub/Sub and Adapters
+Poller publishes to channels; adapters subscribe (e.g., WebSocket on 'bid_placed' for real-time push). For reconnect: Client sends lastEventId; adapter queries outbox for events since, replays via pub/sub or direct.
+
+```typescript
+// Example WebSocket adapter
+class WebSocketAdapter {
+  async handleSubscribe(clientId: string, topic: string): Promise<void> {
+    redis.subscribe(topic, (msg) => {
+      // Send to connected WS client
+      this.wsClients[clientId].send(msg);
     });
+  }
+
+  async handleReconnect(clientId: string, lastEventId: string): Promise<void> {
+    // Query outbox for missed
+    const missed = await db.select().from(outbox).where(gt(outbox.id, parseInt(lastEventId)));
+    for (const event of missed) {
+      this.wsClients[clientId].send(JSON.stringify(event.payload));
+    }
   }
 }
 ```
 
-### Testing Strategy
-- **Adapter Unit Tests**: Test each notification adapter with mocked providers
-- **Message Queue Tests**: Test message delivery and retry logic
-- **Integration Tests**: Test end-to-end notification delivery
-- **Performance Tests**: Test notification throughput and latency
+Supports Email/SMS via poller enqueue to queues (e.g., BullMQ on Redis).
 
-## 7. Infrastructure Layer - External Dependencies
+### Testing Strategy
+- **Poller Unit Tests**: Mock db/redis; test poll/process/mark, retry logic.
+- **Integration Tests**: Real DB/Redis; simulate inserts, verify pub/sub delivery.
+- **Replay Tests**: Insert unprocessed, restart poller, check re-processing.
+- **Load Tests**: 1000 events/sec; ensure no duplicates/loss.
+- **Failure Tests**: DB down, retry >5 → dead-letter.
+
+## 7. Infrastructure Layer - Cross-Cutting Concerns
 
 ### Purpose and Responsibility
-The Infrastructure Layer manages external dependencies, cross-cutting concerns, and shared infrastructure services that support the application layers.
+Manages config, logging, metrics; no in-memory caching—rely on DB indexes/materialized views for performance. DB as truth; infrastructure stateless.
 
 ### Core Components
 
-#### Configuration Management
+#### Configuration and Logging
+Standard: Env/file loading, validation; structured logging (Pino) with DB query traces.
+
 ```typescript
-interface IConfiguration {
-  get<T>(key: string): T;
-  getWithDefault<T>(key: string, defaultValue: T): T;
-  set<T>(key: string, value: T): void;
-  loadFromEnvironment(): Promise<void>;
-  loadFromFile(filePath: string): Promise<void>;
-  validate(): Promise<void>;
-}
-
-class ConfigurationManager implements IConfiguration {
-  private config: Map<string, any> = new Map();
-
-  async loadFromEnvironment(): Promise<void> {
-    // Load from environment variables
-    this.config.set('database.url', process.env.DATABASE_URL);
-    this.config.set('api.port', parseInt(process.env.API_PORT || '3000'));
-  }
-
-  async validate(): Promise<void> {
-    const required = ['database.url', 'api.port'];
-    for (const key of required) {
-      if (!this.config.has(key)) {
-        throw new ConfigurationError(`Missing required configuration: ${key}`);
-      }
-    }
-  }
-}
-```
-
-#### Logging Infrastructure
-```typescript
-interface ILogger {
-  debug(message: string, meta?: any): void;
-  info(message: string, meta?: any): void;
-  warn(message: string, meta?: any): void;
-  error(message: string, error?: Error, meta?: any): void;
-  fatal(message: string, error?: Error, meta?: any): void;
-}
-
-class Logger implements ILogger {
-  constructor(private config: LogConfig) {}
-
-  info(message: string, meta?: any): void {
-    const logEntry = this.formatLog('INFO', message, meta);
-    this.writeToTransports(logEntry);
-  }
-
-  error(message: string, error?: Error, meta?: any): void {
-    const logEntry = this.formatLog('ERROR', message, meta, error);
-    this.writeToTransports(logEntry);
-
-    if (this.config.alertOnError) {
-      this.sendAlert(logEntry);
-    }
-  }
-}
-```
-
-#### Caching Infrastructure
-```typescript
-interface ICache {
-  get<T>(key: string): Promise<T | null>;
-  set<T>(key: string, value: T, ttl?: number): Promise<void>;
-  delete(key: string): Promise<void>;
-  clear(): Promise<void>;
-  exists(key: string): Promise<boolean>;
-}
-
-class RedisCache implements ICache {
-  constructor(private client: RedisClient) {}
-
-  async get<T>(key: string): Promise<T | null> {
-    const value = await this.client.get(key);
-    return value ? JSON.parse(value) : null;
-  }
-
-  async set<T>(key: string, value: T, ttl?: number): Promise<void> {
-    const serialized = JSON.stringify(value);
-    if (ttl) {
-      await this.client.setex(key, ttl, serialized);
-    } else {
-      await this.client.set(key, serialized);
-    }
-  }
-}
+// Config: Load DATABASE_URL, REDIS_URL, etc.
+// Logger: Log service calls, query times: logger.info('Bid placed', { auctionId, duration: 5ms });
 ```
 
 #### Metrics and Monitoring
+Track query latency, tx commits, outbox polls; export to Prometheus.
+
 ```typescript
-interface IMetricsCollector {
-  counter(name: string, value?: number, tags?: Record<string, string>): void;
-  gauge(name: string, value: number, tags?: Record<string, string>): void;
-  histogram(name: string, value: number, tags?: Record<string, string>): void;
-  timing(name: string, duration: number, tags?: Record<string, string>): void;
-}
-
-class MetricsCollector implements IMetricsCollector {
-  private registry: MetricRegistry;
-
-  counter(name: string, value: number = 1, tags?: Record<string, string>): void {
-    const metric = this.getOrCreateCounter(name);
-    metric.inc(value, tags);
-  }
-
-  timing(name: string, duration: number, tags?: Record<string, string>): void {
-    const metric = this.getOrCreateHistogram(name);
-    metric.observe(duration, tags);
-  }
-}
+// Timing queries: const start = Date.now(); ... logger.timing('query.currentPrice', Date.now() - start);
 ```
 
-### Testing Strategy
-- **Infrastructure Unit Tests**: Test each infrastructure component in isolation
-- **Configuration Tests**: Test configuration loading and validation
-- **Logging Tests**: Test log formatting and transport mechanisms
-- **Cache Tests**: Test cache operations and TTL behavior
-- **Metrics Tests**: Test metrics collection and reporting
+#### Caching (DB-Level Only)
+No app-level cache; use materialized views for hot data (e.g., current prices).
 
-## 8. Integration Points and Layer Interactions
+```sql
+-- Example MV for real-time prices (refreshed via trigger or cron)
+CREATE MATERIALIZED VIEW mv_current_prices AS
+SELECT auction_id, COALESCE(MAX(amount), starting_price) AS current_price
+FROM auctions a LEFT JOIN bids b ON a.id = b.auction_id
+GROUP BY a.id, a.starting_price;
+
+-- Trigger refresh on bid insert
+CREATE OR REPLACE FUNCTION refresh_prices() RETURNS TRIGGER AS $$
+BEGIN
+  REFRESH MATERIALIZED VIEW CONCURRENTLY mv_current_prices;
+  RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trig_refresh_prices AFTER INSERT ON bids EXECUTE FUNCTION refresh_prices();
+```
+
+Query: SELECT current_price FROM mv_current_prices WHERE auction_id = ? (faster than aggregate).
+
+### Testing Strategy
+- **Config/Logging Tests**: Validate loads, log formats.
+- **Metrics Tests**: Mock collectors; verify timings.
+- **MV Tests**: Integration; check refresh on inserts, query speed vs. raw.
+
+## 8. Integration Points - Stateless Flow
 
 ### Dependency Flow
 ```
-API Layer → Service Layer → Repository Layer → Database Layer
-    ↓           ↓              ↓              ↓
-Infrastructure Layer (Logging, Metrics, Caching)
-    ↓
-Notification Layer (Real-time updates)
+API (REST/gRPC/GraphQL) → Service (validate + tx) → Queries (Drizzle SQL) → DB (indexes/MVs)
+                          ↓
+                      Outbox Poller → Pub/Sub (Redis/NOTIFY) → Adapters (WS/Email)
+                          ↓
+                      Infrastructure (Logs/Metrics/Config)
 ```
 
-### Key Integration Patterns
+Mermaid diagram for request flow:
 
-#### Dependency Injection Container
-```typescript
-interface IContainer {
-  register<T>(token: Token<T>, factory: Factory<T>): void;
-  resolve<T>(token: Token<T>): T;
-  createScope(): IContainer;
-}
-
-class DIContainer implements IContainer {
-  private services: Map<Token<any>, Factory<any>> = new Map();
-  private instances: Map<Token<any>, any> = new Map();
-
-  register<T>(token: Token<T>, factory: Factory<T>): void {
-    this.services.set(token, factory);
-  }
-
-  resolve<T>(token: Token<T>): T {
-    if (this.instances.has(token)) {
-      return this.instances.get(token);
-    }
-
-    const factory = this.services.get(token);
-    if (!factory) {
-      throw new ServiceNotFoundError(token);
-    }
-
-    const instance = factory(this);
-    this.instances.set(token, instance);
-    return instance;
-  }
-}
+```mermaid
+graph TD
+    A[API Request e.g., POST /bids] --> B[Adapter: Map to Branded Req]
+    B --> C[Service: Validate + Idempotency Query]
+    C --> D[Tx: INSERT Bid + Outbox Event]
+    D --> E[Query: SELECT Current Price/Status via SQL]
+    E --> F[Response: Map Data to JSON/Proto]
+    D --> G[Poller: Poll Outbox 100ms]
+    G --> H[Publish to Pub/Sub]
+    H --> I[Adapters: Push to WS/Email]
+    J[Reconnect] --> K[Query Outbox Since Last ID + Replay]
 ```
 
-#### Cross-Cutting Concerns Integration
-```typescript
-class RequestContext {
-  private static context: Map<string, any> = new Map();
+### Key Patterns
+- **Idempotency/Outbox**: SELECT on key before INSERT; tx ensures atomicity.
+- **Stateless**: No shared state; each op independent, DB truth.
+- **DI**: Inject queries/services (e.g., Inversify); per-request scope.
+- **Cross-Cutting**: Middleware for logging/metrics (e.g., trace tx duration).
 
-  static set(key: string, value: any): void {
-    this.context.set(key, value);
-  }
-
-  static get<T>(key: string): T | undefined {
-    return this.context.get(key);
-  }
-
-  static run<T>(context: Map<string, any>, operation: () => T): T {
-    const previousContext = new Map(this.context);
-    this.context = new Map([...previousContext, ...context]);
-
-    try {
-      return operation();
-    } finally {
-      this.context = previousContext;
-    }
-  }
-}
-```
 ### Testing Strategy
-- **Integration Tests**: Test layer interactions and data flow
-- **End-to-End Tests**: Test complete workflows across all layers
-- **Performance Tests**: Test system performance under load
-- **Reliability Tests**: Test failure scenarios and recovery mechanisms
+- **E2E Tests**: API → DB roundtrip; verify outbox/poller delivery.
+- **Load/Perf**: JMeter on endpoints; monitor query plans.
+- **Chaos**: Kill poller; verify replay on restart, no lost events.
+- **Reliability**: Simulate DB lag; test tx timeouts, idempotency.

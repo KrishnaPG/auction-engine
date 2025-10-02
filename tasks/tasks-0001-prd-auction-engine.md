@@ -62,6 +62,8 @@ This project delivers a comprehensive reusable auction engine supporting all 13 
 - `README.md` - Project documentation.
 
 ## Notes
+- Critical: the auction/bidding might happen over a long period of time and our app/package might have restarted multiple times during that period. Do not expect anything to be in memory. Always use database as the single source of truth. Never store any state data in memory. 
+- Reliability should be the key concern and expect everything to fail at any point of time and design the code to withstand that.
 - Unit tests should be in separate, dedicated `tests` folder (not to be mixed with code files in the `src` folder).
 - Use `Bun test [optional/path/to/test/file]` to run tests. Running without a path executes all tests found by the Bun test configuration.
 - Apart from unit tests we should have a test driver (CLI) that can test end-to-end engine with various different test mock auction scenarios (preferably loaded from test JSON file);
@@ -71,7 +73,8 @@ This project delivers a comprehensive reusable auction engine supporting all 13 
 - Coding standards: use prefix `I` for typescript interfaces (e.g. `interface IBid`) and prefix `T` for types (e.g. `type IEntry`);
 - Avoid memory allocations and aim for zero-copy;
 - Code Reliability must be very high; It should be fault-tolerant and crash-resilient;
-- Use branded types instead of plain types wherever possible.
+- Use branded types instead of plain types wherever possible. Avoid primitive type castings, such as `Number(Date.now())` or `x as number` as much as possible. Brand types can be compared and assigned directly as long as their base type is same;
+- Use Open/Closed Principle (e.g. instead of using `switch..case` to route to various functions, maintain a map of functions indexed by key and use object key based lookups);
 - If something is not clear or not stated explicitly, do not assume anything - ask explicitly for clarifications instead of deciding one or other.
   
 ## Tech stack
@@ -81,6 +84,14 @@ This project delivers a comprehensive reusable auction engine supporting all 13 
 - Database: Drizzle ORM with Postgres as primary for development; In production use the database based on the config settings;
 - Use `Biomejs` for format, linting etc.
 - For auth assume this is behind a pre-authenticated proxy; You will get `tenantId`;
+
+## Key implementation directives
+- **Thin Wrapper**: The package is a set of query functions/services that execute parameterized SQL (database-agnostic where possible) via Drizzle abstraction. 
+- **Offload to DB**: Use SQL for all logic. e.g. current price/max bid via aggregates, status via CASE on timestamps/bids, winner determination via existing SQL designs. Leverage Postgres features (e.g., materialized views for real-time, triggers for outbox/events). For multi-auction types, parameterize queries (e.g., WHERE type = ?).
+- **No In-Memory State**: Everything is stateless query execution. Services are thin: validate input (branded types), execute query in tx, return results.
+- **Reliability/Fault Tolerance**: Retain idempotency (check DB for key before insert), outbox (DB table + poller for notifications), but simplify: events as DB inserts, polled by worker. Notifications via DB-triggered pub/sub (e.g., LISTEN/NOTIFY in Postgres) or external (Redis, but DB-first).
+- **Performance**: Use Drizzle for zero-copy (direct row mapping to branded types), connection pooling, prepared statements. No caching layer if DB indexes suffice; if needed, DB-level (e.g., materialized views).
+- **API Exposure**: CRUD via query wrappers (e.g., createAuction => INSERT returning id), supporting REST/gRPC/GraphQL by mapping to these queries.
 
 ## Tasks
 - [x] 0.0 Research
@@ -100,48 +111,48 @@ This project delivers a comprehensive reusable auction engine supporting all 13 
   - [x] 1.5 Create core utilities and constants for the auction engine
 
 - [ ] 2.0 Auction Management System
-  - [ ] 2.1 Implement auction factory pattern for creating different auction types
-  - [ ] 2.2 Create English auction implementation with ascending price logic
-  - [ ] 2.3 Create Dutch auction implementation with descending price logic
-  - [ ] 2.4 Create sealed-bid auction implementation with hidden bidding
-  - [ ] 2.5 Create reverse auction implementation for supplier bidding
-  - [ ] 2.6 Create Vickrey auction implementation with second-price sealed bidding
-  - [ ] 2.7 Create buy-it-now auction implementation for immediate purchase
-  - [ ] 2.8 Create double auction implementation with buyer/seller matching
-  - [ ] 2.9 Create all-pay auction implementation where all bidders pay
-  - [ ] 2.10 Create Japanese auction implementation with elimination rounds
-  - [ ] 2.11 Create Chinese auction implementation with rapid price drops
-  - [ ] 2.12 Create penny auction implementation with bid fees and time extension
-  - [ ] 2.13 Create multi-unit auction implementation for multiple identical items
-  - [ ] 2.14 Create combinatorial auction implementation for package bidding
-  - [ ] 2.15 Implement auction configuration management system
-  - [ ] 2.16 Create auction lifecycle management (create, start, end, cancel)
+  - [ ] 2.1 Implement Drizzle query wrappers for auction factory: Parameterized INSERT into auctions table with branded types for inputs (TAuctionId, AuctionType, Money for prices); thin service for validation and tx execution with outbox insert for 'auction_created' event.
+  - [ ] 2.2 Create SQL queries for English auction dynamics: ascending current price via MAX(bids.amount) WHERE auction_id=? AND type='english', time-based status via CASE on start_time/end_time/bids count; Drizzle wrapper in src/database/queries/english-queries.ts with branded outputs (Money for price, AuctionStatus).
+  - [ ] 2.3 Create SQL queries for Dutch auction dynamics: descending current price via UPDATE auctions SET current_price = current_price - decrement WHERE type='dutch' AND status='active', status via CASE on bids acceptance; Drizzle wrapper in src/database/queries/dutch-queries.ts integrating idempotency check (SELECT before UPDATE) and outbox for price changes.
+  - [ ] 2.4 Create SQL queries for sealed-bid auction dynamics: hidden bids via INSERT into bids with is_anonymous=true, reveal at end via SELECT * FROM bids WHERE auction_id=? AND type='sealed_bid' ORDER BY amount DESC after status='completed'; Drizzle wrapper in src/database/queries/sealed-bid-queries.ts with thin JS for tx and branded BidData outputs.
+  - [ ] 2.5 Create SQL queries for reverse auction dynamics: lowest bid tracking via MIN(bids.amount) WHERE type='reverse', status via CASE on supplier bids; Drizzle wrapper in src/database/queries/reverse-queries.ts with validation service for amount < current_price and outbox for bid notifications.
+  - [ ] 2.6 Create SQL queries for Vickrey auction dynamics: second-price calculation via subquery for second MAX(bids.amount), winner via highest bid; Drizzle wrapper in src/database/queries/vickrey-queries.ts using parameterized SQL from docs/0-3, thin service for tx update on auction end.
+  - [ ] 2.7 Create SQL queries for buy-it-now auction dynamics: immediate win check via SELECT IF(amount >= buy_it_now_price, 'win', 'bid') on INSERT, status update to 'completed' if won; Drizzle wrapper in src/database/queries/buy-it-now-queries.ts with idempotency and outbox for purchase events.
+  - [ ] 2.8 Create SQL queries for double auction dynamics: buyer/seller matching via CROSS JOIN on bids with bid_type='buyer'/'seller' WHERE buyer.amount >= seller.amount, equilibrium price avg; Drizzle wrapper in src/database/queries/double-queries.ts with branded matching results.
+  - [ ] 2.9 Create SQL queries for all-pay auction dynamics: all bids payment via INSERT bids with status='paid', winner via MAX(amount); Drizzle wrapper in src/database/queries/all-pay-queries.ts integrating outbox for all payment events.
+  - [ ] 2.10 Create SQL queries for Japanese auction dynamics: elimination rounds via UPDATE bids SET status='eliminated' WHERE amount < current_round_price, last active via COUNT(active)=1; Drizzle wrapper in src/database/queries/japanese-queries.ts with tx for round updates.
+  - [ ] 2.11 Create SQL queries for Chinese auction dynamics: rapid price drops via scheduled UPDATE current_price, first acceptance via MIN(submitted_at) WHERE amount >= current_price; Drizzle wrapper in src/database/queries/chinese-queries.ts with poller trigger.
+  - [ ] 2.12 Create SQL queries for penny auction dynamics: bid fees via INSERT bids with bid_fee_amount, time extension via UPDATE end_time = end_time + extension; Drizzle wrapper in src/database/queries/penny-queries.ts with idempotency and outbox for extensions.
+  - [ ] 2.13 Create SQL queries for multi-unit auction dynamics: quantity allocation via SUM(quantity) OVER (ORDER BY amount DESC) <= available_quantity; Drizzle wrapper in src/database/queries/multi-unit-queries.ts using ROW_NUMBER for ranking.
+  - [ ] 2.14 Create SQL queries for combinatorial auction dynamics: package bidding via JSON package_items, greedy winner via MAX(package_bid_amount); Drizzle wrapper in src/database/queries/combinatorial-queries.ts with validation for non-overlapping packages.
+  - [ ] 2.15 Implement auction configuration management: INSERT/SELECT from auction_configurations table with JSON values, parameterized by auction_id; thin Drizzle service for validation using branded types and tx.
+  - [ ] 2.16 Create auction lifecycle management: UPDATE auctions SET status=? WHERE id=? in tx, with outbox inserts for 'started'/'ended'/'cancelled'; Drizzle wrapper integrating status CASE queries and idempotency checks.
 
 - [ ] 3.0 Business Rules Engine
-  - [ ] 3.1 Design business rules configuration system
-  - [ ] 3.2 Implement minimum bid increment validation
-  - [ ] 3.3 Implement maximum bids per user validation
-  - [ ] 3.4 Implement bid retraction time limit logic
-  - [ ] 3.5 Implement reserve price handling
-  - [ ] 3.6 Implement auction duration settings and management
-  - [ ] 3.7 Implement auto-extension rules for last-minute bidding
-  - [ ] 3.8 Create rules validation engine with comprehensive error handling
+  - [ ] 3.1 Design business rules configuration system: INSERT into rules table with JSON validation_rules, query via SELECT config_value FROM auction_configurations WHERE auction_id=? AND config_key='rules'; thin service for loading branded rule objects.
+  - [ ] 3.2 Implement SQL validation for min bid: SELECT CASE WHEN amount < (SELECT min_increment FROM auctions WHERE id=?) THEN 'invalid' ELSE 'valid' END; Drizzle wrapper in src/database/queries/validation-queries.ts calling from thin JS validator with branded Money inputs.
+  - [ ] 3.3 Implement SQL validation for maximum bids per user: SELECT COUNT(*) FROM bids WHERE auction_id=? AND user_id=? AND status='active' > max_bids; Drizzle query with parameterized limits, integrated in bid service tx.
+  - [ ] 3.4 Implement SQL validation for bid retraction time limit: SELECT CASE WHEN submitted_at > NOW() - retraction_window THEN 'allowed' ELSE 'expired' END FROM bids WHERE id=?; Drizzle wrapper with outbox for retraction events.
+  - [ ] 3.5 Implement SQL handling for reserve price: SELECT CASE WHEN MAX(amount) >= reserve_price THEN 'met' ELSE 'not_met' END FROM bids JOIN auctions; thin service querying in tx before status updates.
+  - [ ] 3.6 Implement SQL for auction duration settings: UPDATE end_time = start_time + duration WHERE id=?; Drizzle wrapper with validation for overlaps and outbox notifications.
+  - [ ] 3.7 Implement SQL for auto-extension rules: UPDATE end_time = end_time + extension_duration WHERE submitted_at > end_time - trigger_seconds AND extensions < max; Drizzle trigger or poller with tx.
+  - [ ] 3.8 Create rules validation engine: Thin JS service orchestrating multiple SQL checks (JOIN auctions, bids, rules tables) with branded error outputs; integrate in all mutation tx via Drizzle.
 
 - [ ] 4.0 Bid Processing System
-  - [ ] 4.1 Implement bid submission API with validation
-  - [ ] 4.2 Create real-time bid processing system
-  - [ ] 4.3 Implement concurrent bid handling for high-throughput scenarios
-  - [ ] 4.4 Create immutable bid storage system
-  - [ ] 4.5 Implement bid retraction functionality within time limits
-  - [ ] 4.6 Add comprehensive bid validation against auction rules
-  - [ ] 4.7 Implement error handling for invalid bids and network issues
+  - [ ] 4.1 Implement bid submission query: INSERT INTO bids (auction_id, user_id, amount, idempotency_key) RETURNING id, with prior SELECT for idempotency; Drizzle wrapper in src/database/queries/bid-queries.ts using branded PlaceBidRequest, thin service for tx.
+  - [ ] 4.2 Create real-time bid processing: Parameterized INSERT with DB locks (FOR UPDATE on auctions), status update via CASE; integrate outbox for 'bid_placed' in tx, polled for notifications.
+  - [ ] 4.3 Implement concurrent bid handling: Serializable tx with SELECT FOR UPDATE on auctions/bids, SQL joins for validation (amount > MAX(bid) + increment); Drizzle service ensuring atomicity via tx isolation.
+  - [ ] 4.4 Create immutable bid storage: INSERT into bids and bid_history with old/new values; Drizzle wrapper appending to history table without updates to bids.
+  - [ ] 4.5 Implement bid retraction: UPDATE bids SET status='retracted' WHERE id=? AND submitted_at > retraction_deadline, INSERT to bid_retractions and outbox; Drizzle tx with validation query.
+  - [ ] 4.6 Add comprehensive bid validation: SQL joins on auctions, bids, rules (e.g., SELECT IF(amount >= current_price + min_increment AND status='active', 'valid', 'invalid')); thin service calling multiple queries.
+  - [ ] 4.7 Implement error handling for invalid bids: Tx rollback on validation fail, INSERT to rule_violations table; Drizzle service with branded error types and logging.
 
 - [ ] 5.0 Winner Determination & Real-time Features
-  - [ ] 5.1 Implement SQL-based winner determination queries for each auction type
-  - [ ] 5.2 Create tie-breaking logic for auctions with multiple high bids
-  - [ ] 5.3 Implement atomic auction status updates
-  - [ ] 5.4 Create real-time notification system for bid updates
-  - [ ] 5.5 Implement WebSocket/SSE for live auction updates
-  - [ ] 5.6 Create API endpoints for auction status and winner information
-  - [ ] 5.7 Implement audit trail maintenance for all auction activities
-  - [ ] 5.8 Add performance monitoring and debugging capabilities
+  - [ ] 5.1 Implement SQL-based winner determination queries for each auction type: Parameterized views/CASE from docs/0-3-winner-determination-sql-queries.md (e.g., English: ROW_NUMBER() OVER (ORDER BY amount DESC) =1); Drizzle wrappers in src/database/queries/winner-queries.ts with branded outputs.
+  - [ ] 5.2 Create tie-breaking logic: Extend winner SQL with ORDER BY amount DESC, submitted_at ASC; Drizzle query handling multi-winners for multi-unit via LATERAL or aggregates.
+  - [ ] 5.3 Implement atomic auction status updates: Tx UPDATE auctions SET status='completed', determine_winner query, INSERT outbox 'auction_ended'; Drizzle service ensuring consistency.
+  - [ ] 5.4 Create real-time notification system for bid updates: INSERT to outbox on bid tx, DB poller queries unprocessed events every 100ms for pub/sub (LISTEN/NOTIFY or Redis).
+  - [ ] 5.5 Implement WebSocket/SSE for live auction updates: Poller publishes to channels, adapters subscribe and push to connections; query outbox for replay on reconnect.
+  - [ ] 5.6 Create API endpoints for auction status and winner information: Thin wrappers calling Drizzle queries (getStatus, determineWinner) with branded responses for REST/gRPC/GraphQL.
+  - [ ] 5.7 Implement audit trail maintenance: INSERT to audit_trail on all tx (bids, auctions updates) with JSON payload; Drizzle triggers or service integration for immutability.
+  - [ ] 5.8 Add performance monitoring: Query logging in Drizzle adapter, INSERT to system_events for metrics (tx duration, query plans); thin service exposing via API.

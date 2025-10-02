@@ -1,5 +1,19 @@
 // Core Domain Interfaces for Auction System
 
+export type {
+	TAuctionEndTime,
+	TAuctionId,
+	TAuctionStartTime,
+	TBidAmount,
+	TCurrentPrice,
+	TIdempotencyKey,
+	TMinimumIncrement,
+	TTimestamp,
+	TUserId,
+} from "./branded-types";
+
+export type Tx = ITransaction;
+
 import type {
 	TApprovalState,
 	TAuctionDuration,
@@ -11,6 +25,7 @@ import type {
 	TBidQuantity,
 	TCurrency,
 	TCurrentPrice,
+	TIdempotencyKey,
 	TItemId,
 	TItemQuantity,
 	TMinimumIncrement,
@@ -72,19 +87,39 @@ export enum AccountStatus {
 	BANNED = "banned",
 }
 
-// Value Objects
-export interface Money {
-	readonly amount: number;
-	readonly currency: TCurrency;
-
-	add(other: Money): Money;
-	subtract(other: Money): Money;
-	multiply(factor: number): Money;
-	isGreaterThan(other: Money): boolean;
-	isLessThan(other: Money): boolean;
-	isEqualTo(other: Money): boolean;
-	toCents(): number;
-	toDollars(): number;
+// Value Objects (Branded/Thin)
+export class Money {
+	constructor(
+		public readonly amount: number,
+		public readonly currency: TCurrency,
+	) {}
+	static fromDb(dbValue: { amount: number; currency: string }): Money {
+		return new Money(dbValue.amount, dbValue.currency as TCurrency);
+	}
+	add(other: Money): Money {
+		return new Money(this.amount + other.amount, this.currency);
+	}
+	subtract(other: Money): Money {
+		return new Money(this.amount - other.amount, this.currency);
+	}
+	multiply(factor: number): Money {
+		return new Money(this.amount * factor, this.currency);
+	}
+	isGreaterThan(other: Money): boolean {
+		return this.amount > other.amount;
+	}
+	isLessThan(other: Money): boolean {
+		return this.amount < other.amount;
+	}
+	isEqualTo(other: Money): boolean {
+		return this.amount === other.amount && this.currency === other.currency;
+	}
+	toCents(): number {
+		return Math.round(this.amount * 100);
+	}
+	toDollars(): number {
+		return this.amount;
+	}
 }
 
 export interface Duration {
@@ -100,95 +135,64 @@ export interface Duration {
 	isLessThan(other: Duration): boolean;
 }
 
-// Core Domain Entities
+// Data Types (Plain Objects from DB)
 
-export interface IAuction {
-	// Identity & Status
-	getId(): TAuctionId;
-	getStatus(): AuctionStatus;
-	getVersion(): number;
-
-	// Core Properties
-	getTitle(): string;
-	getDescription(): string;
-	getType(): AuctionType;
-	getStartTime(): TAuctionStartTime;
-	getEndTime(): TAuctionEndTime;
-
-	// Pricing
-	getStartingPrice(): Money;
-	getCurrentPrice(): Money;
-	getReservePrice(): Money | null;
-	getMinBidIncrement(): Money;
-
-	// Business Rules
-	canPlaceBid(bid: IBid): boolean;
-	canEnd(): boolean;
-	canExtend(): boolean;
-	canPause(): boolean;
-	canResume(): boolean;
-	canCancel(): boolean;
-
-	// State Changes
-	placeBid(bid: IBid): void;
-	end(): void;
-	extend(duration: Duration): void;
-	pause(reason: string): void;
-	resume(): void;
-	cancel(reason: string): void;
-
-	// Metadata
-	getCreatedBy(): TUserId;
-	getCreatedAt(): TTimestamp;
-	getUpdatedAt(): TTimestamp;
-	getBids(): ReadonlyArray<IBid>;
-	getItemCount(): number;
+export interface AuctionData {
+	id: TAuctionId;
+	title: string;
+	description: string;
+	type: AuctionType;
+	startTime: TAuctionStartTime;
+	endTime: TAuctionEndTime;
+	startingPrice: TStartingPrice;
+	reservePrice?: TReservePrice;
+	minIncrement: TMinimumIncrement;
+	status: AuctionStatus; // Computed via SQL
+	version: number;
+	createdBy: TUserId;
+	createdAt: TTimestamp;
+	updatedAt: TTimestamp;
+	itemCount: number;
 }
 
-export interface IBid {
-	getId(): TBidId;
-	getAuctionId(): TAuctionId;
-	getBidderId(): TUserId;
-	getAmount(): Money;
-	getQuantity(): TBidQuantity;
-	getTimestamp(): TTimestamp;
-	getStatus(): BidStatus;
-	isWinning(): boolean;
-	isRetracted(): boolean;
-	canRetract(): boolean;
-	retract(reason: string): void;
-	getVersion(): number;
+export interface BidData {
+	id: TBidId;
+	auctionId: TAuctionId;
+	bidderId: TUserId;
+	amount: TBidAmount;
+	quantity: TBidQuantity;
+	timestamp: TTimestamp;
+	status: BidStatus;
+	isWinning: boolean; // Computed via SQL
+	version: number;
 }
 
-export interface IUser {
-	getId(): TUserId;
-	getUsername(): string;
-	getEmail(): string;
-	getRoles(): ReadonlyArray<UserRole>;
-	getAccountStatus(): AccountStatus;
-	canParticipateInAuction(auction: IAuction): boolean;
-	hasPermission(permission: string): boolean;
-	isEmailVerified(): boolean;
-	isActive(): boolean;
-	getCreatedAt(): TTimestamp;
-	getLastLoginAt(): TTimestamp | null;
+export interface UserData {
+	id: TUserId;
+	username: string;
+	email: string;
+	roles: UserRole[];
+	accountStatus: AccountStatus;
+	isEmailVerified: boolean;
+	createdAt: TTimestamp;
+	lastLoginAt?: TTimestamp;
 }
 
-export interface IItem {
-	getId(): TItemId;
-	getAuctionId(): TAuctionId;
-	getTitle(): string;
-	getDescription(): string;
-	getCategory(): string;
-	getQuantity(): TItemQuantity;
-	getStartingBid(): Money | null;
-	getBuyItNowPrice(): Money | null;
-	getFairMarketValue(): Money | null;
-	getImages(): ReadonlyArray<string>;
-	getSpecifications(): ReadonlyMap<string, string>;
-	getCondition(): string;
-	getLocation(): string | null;
-	getShippingInfo(): ReadonlyMap<string, any>;
+export interface ItemData {
+	id: TItemId;
+	auctionId: TAuctionId;
+	title: string;
+	description: string;
+	category: string;
+	quantity: TItemQuantity;
+	startingBid?: TStartingPrice;
+	buyItNowPrice?: TStartingPrice;
+	fairMarketValue?: TStartingPrice;
+	images: string[];
+	specifications: Record<string, string>;
+	condition: string;
+	location?: string;
+	shippingInfo: Record<string, any>;
 }
 
 // Request/Response Types
@@ -205,6 +209,7 @@ export interface CreateAuctionRequest {
 	readonly items: ReadonlyArray<CreateItemRequest>;
 	readonly configurations: ReadonlyMap<string, any>;
 	readonly createdBy: TUserId;
+	idempotencyKey?: TIdempotencyKey;
 }
 
 export interface CreateItemRequest {
@@ -229,6 +234,7 @@ export interface PlaceBidRequest {
 	readonly quantity?: TBidQuantity;
 	readonly maxProxyAmount?: Money;
 	readonly isAnonymous?: boolean;
+	idempotencyKey?: TIdempotencyKey;
 }
 
 export interface BidResult {
@@ -248,62 +254,62 @@ export interface AuctionResult {
 	readonly resultType: "sold" | "reserve_not_met" | "no_bids" | "cancelled";
 }
 
-// Repository Interfaces
+// Query Interfaces (Stateless DB Access)
 
-export interface IRepository<T, TId> {
-	findById(id: TId): Promise<T | null>;
-	findAll(criteria?: QueryCriteria): Promise<ReadonlyArray<T>>;
-	save(entity: T): Promise<T>;
-	saveAll(entities: ReadonlyArray<T>): Promise<ReadonlyArray<T>>;
-	delete(id: TId): Promise<boolean>;
-	deleteByCriteria(criteria: QueryCriteria): Promise<number>;
-	exists(id: TId): Promise<boolean>;
-	count(criteria?: QueryCriteria): Promise<number>;
+export interface IAuctionQueries {
+	getAuctionData(id: TAuctionId): Promise<AuctionData | null>; // SELECT * FROM auctions WHERE id = ?
+	getCurrentPrice(
+		auctionId: TAuctionId,
+		type: AuctionType,
+	): Promise<TCurrentPrice>; // Type-specific CASE SQL
+	getStatus(id: TAuctionId): Promise<AuctionStatus>; // CASE on times/bids
+	canPlaceBid(auctionId: TAuctionId, amount: TBidAmount): Promise<boolean>; // SQL checks
+	createAuction(tx: Tx, req: CreateAuctionRequest): Promise<TAuctionId>; // Prepared INSERT with idempotency
+	updateAuction(
+		tx: Tx,
+		id: TAuctionId,
+		updates: Partial<AuctionData>,
+	): Promise<void>; // UPDATE with version
+	setAuctionConfig(
+		tx: Tx,
+		auctionId: TAuctionId,
+		config: AuctionConfig,
+	): Promise<void>; // INSERT/UPDATE JSONB
+	updateAuctionStatus(
+		tx: Tx,
+		auctionId: TAuctionId,
+		newStatus: AuctionStatus,
+		reason?: string,
+	): Promise<void>; // UPDATE status + outbox
+	findAuctions(criteria?: QueryCriteria): Promise<AuctionData[]>; // Dynamic filters
+	findActiveAuctions(): Promise<AuctionData[]>;
+	findAuctionsByType(type: AuctionType): Promise<AuctionData[]>;
+	findAuctionsByCreator(creatorId: TUserId): Promise<AuctionData[]>;
+	getByIdempotency(key: TIdempotencyKey): Promise<TAuctionId | null>; // SELECT for idempotency
 }
 
-export interface IAuctionRepository extends IRepository<IAuction, TAuctionId> {
-	findActiveAuctions(): Promise<ReadonlyArray<IAuction>>;
-	findAuctionsByType(type: AuctionType): Promise<ReadonlyArray<IAuction>>;
-	findAuctionsByStatus(status: AuctionStatus): Promise<ReadonlyArray<IAuction>>;
-	findAuctionsEndingSoon(minutes: number): Promise<ReadonlyArray<IAuction>>;
-	findAuctionsByBidder(bidderId: TUserId): Promise<ReadonlyArray<IAuction>>;
-	findAuctionsByPriceRange(
-		minPrice: Money,
-		maxPrice: Money,
-	): Promise<ReadonlyArray<IAuction>>;
-	findAuctionsByCreator(creatorId: TUserId): Promise<ReadonlyArray<IAuction>>;
-	findScheduledAuctions(): Promise<ReadonlyArray<IAuction>>;
-	findCompletedAuctions(since?: TTimestamp): Promise<ReadonlyArray<IAuction>>;
+export interface IBidQueries {
+	placeBid(req: PlaceBidRequest): Promise<TBidId>; // Idempotency SELECT, INSERT (tx)
+	getBidsByAuction(auctionId: TAuctionId): Promise<BidData[]>;
+	getWinningBids(auctionId: TAuctionId): Promise<BidData[]>; // ROW_NUMBER ORDER BY amount DESC
+	getByIdempotency(key: TIdempotencyKey): Promise<BidData | null>;
+	retractBid(bidId: TBidId): Promise<void>; // UPDATE status
+	findBidsByBidder(bidderId: TUserId): Promise<BidData[]>;
 }
 
-export interface IBidRepository extends IRepository<IBid, TBidId> {
-	findBidsByAuction(auctionId: TAuctionId): Promise<ReadonlyArray<IBid>>;
-	findBidsByBidder(bidderId: TUserId): Promise<ReadonlyArray<IBid>>;
-	findWinningBidsByAuction(auctionId: TAuctionId): Promise<ReadonlyArray<IBid>>;
-	findHighestBidByAuction(auctionId: TAuctionId): Promise<IBid | null>;
-	findBidsInTimeRange(
-		startTime: TTimestamp,
-		endTime: TTimestamp,
-	): Promise<ReadonlyArray<IBid>>;
-	findActiveBidsByAuction(auctionId: TAuctionId): Promise<ReadonlyArray<IBid>>;
-	findRetractedBidsByBidder(bidderId: TUserId): Promise<ReadonlyArray<IBid>>;
-	findBidsByAmountRange(
-		minAmount: Money,
-		maxAmount: Money,
-	): Promise<ReadonlyArray<IBid>>;
+export interface IWinnerQueries {
+	determineWinner(
+		auctionId: TAuctionId,
+		type: AuctionType,
+	): Promise<TUserId | null>; // Parameterized SQL
+	determineWinners(auctionId: TAuctionId): Promise<Map<TUserId, TBidId>>; // Multi-unit/combinatorial
 }
 
-export interface IUserRepository extends IRepository<IUser, TUserId> {
-	findByUsername(username: string): Promise<IUser | null>;
-	findByEmail(email: string): Promise<IUser | null>;
-	findByRole(role: UserRole): Promise<ReadonlyArray<IUser>>;
-	findByAccountStatus(status: AccountStatus): Promise<ReadonlyArray<IUser>>;
-	findActiveUsers(): Promise<ReadonlyArray<IUser>>;
-	findUsersByCreationDate(
-		startDate: TTimestamp,
-		endDate: TTimestamp,
-	): Promise<ReadonlyArray<IUser>>;
-	findUsersByLastLogin(since: TTimestamp): Promise<ReadonlyArray<IUser>>;
+export interface IUserQueries {
+	getUserData(id: TUserId): Promise<UserData | null>;
+	findByUsername(username: string): Promise<UserData | null>;
+	findActiveUsers(): Promise<UserData[]>;
+}
 }
 
 // Query Specification Pattern
@@ -341,73 +347,35 @@ export interface PaginationOptions {
 	readonly offset?: number;
 }
 
-// Service Interfaces
+// Service Interfaces (Thin, Query-Based)
 
 export interface IAuctionService {
-	createAuction(request: CreateAuctionRequest): Promise<IAuction>;
-	startAuction(auctionId: TAuctionId): Promise<void>;
-	pauseAuction(auctionId: TAuctionId, reason: string): Promise<void>;
-	resumeAuction(auctionId: TAuctionId): Promise<void>;
-	endAuction(auctionId: TAuctionId): Promise<AuctionResult>;
-	cancelAuction(auctionId: TAuctionId, reason: string): Promise<void>;
-	extendAuction(auctionId: TAuctionId, duration: Duration): Promise<void>;
-	getAuction(auctionId: TAuctionId): Promise<IAuction | null>;
-	getAuctionsByStatus(status: AuctionStatus): Promise<ReadonlyArray<IAuction>>;
-	getAuctionsByType(type: AuctionType): Promise<ReadonlyArray<IAuction>>;
+	createAuction(req: CreateAuctionRequest): Promise<TAuctionId>;
+	endAuction(id: TAuctionId): Promise<AuctionResult>;
+	extendAuction(id: TAuctionId, duration: number): Promise<void>; // seconds
+	getAuctionData(id: TAuctionId): Promise<AuctionData | null>; // Delegate
+	findAuctionsByStatus(status: AuctionStatus): Promise<AuctionData[]>;
+	findAuctionsByType(type: AuctionType): Promise<AuctionData[]>;
 }
 
 export interface IBidService {
-	placeBid(request: PlaceBidRequest): Promise<BidResult>;
-	retractBid(bidId: TBidId, reason: string): Promise<void>;
-	validateBid(auctionId: TAuctionId, bidAmount: Money): Promise<BidValidation>;
-	getBidHistory(auctionId: TAuctionId): Promise<ReadonlyArray<IBid>>;
-	getUserBids(userId: TUserId): Promise<ReadonlyArray<IBid>>;
-	getWinningBids(auctionId: TAuctionId): Promise<ReadonlyArray<IBid>>;
-	getBid(bidId: TBidId): Promise<IBid | null>;
+	placeBid(req: PlaceBidRequest): Promise<TBidId>;
+	validateBid(
+		auctionId: TAuctionId,
+		amount: TBidAmount,
+	): Promise<BidValidation>;
+	getBidHistory(auctionId: TAuctionId): Promise<BidData[]>;
+	getWinningBids(auctionId: TAuctionId): Promise<BidData[]>;
+	getUserBids(userId: TUserId): Promise<BidData[]>;
 }
 
 export interface IUserService {
-	createUser(request: CreateUserRequest): Promise<IUser>;
-	authenticateUser(
-		username: string,
-		password: string,
-	): Promise<AuthenticationResult>;
-	getUser(userId: TUserId): Promise<IUser | null>;
-	updateUser(userId: TUserId, updates: UserUpdateRequest): Promise<IUser>;
-	deactivateUser(userId: TUserId, reason: string): Promise<void>;
-	verifyEmail(userId: TUserId, token: string): Promise<boolean>;
-	resetPassword(userId: TUserId, newPassword: string): Promise<void>;
+	createUser(req: CreateUserRequest): Promise<TUserId>;
+	getUserData(id: TUserId): Promise<UserData | null>;
+	updateUser(id: TUserId, updates: UserUpdateRequest): Promise<void>;
 }
 
-// Strategy Interfaces
-
-export interface IAuctionStrategy {
-	readonly strategyType: AuctionType;
-	readonly strategyName: string;
-
-	canPlaceBid(auction: IAuction, bid: IBid): boolean;
-	calculateNextPrice(auction: IAuction, currentBid?: IBid): Money;
-	determineWinner(auction: IAuction): WinnerDeterminationResult;
-	shouldExtendAuction(auction: IAuction): boolean;
-	calculateExtensionDuration(auction: IAuction): Duration;
-	processBid(auction: IAuction, bid: IBid): BidProcessingResult;
-	finalizeAuction(auction: IAuction): AuctionFinalizationResult;
-	validateAuctionConfig(config: any): ValidationResult;
-}
-
-export interface IBidProcessingStrategy {
-	processBid(auction: IAuction, bid: IBid): BidProcessingResult;
-	validateBid(auction: IAuction, bid: IBid): BidValidation;
-	calculateBidImpact(auction: IAuction, bid: IBid): BidImpact;
-	shouldNotifyBidUpdate(bid: IBid): boolean;
-}
-
-export interface IWinnerDeterminationStrategy {
-	determineWinner(auction: IAuction): WinnerDeterminationResult;
-	determineWinners(auction: IAuction): WinnersDeterminationResult;
-	isAuctionComplete(auction: IAuction): boolean;
-	calculateFinalPrices(auction: IAuction): ReadonlyMap<TBidId, Money>;
-}
+// No strategies: Logic in SQL parameterized by type
 
 // Database Interfaces
 
@@ -441,19 +409,37 @@ export interface ITransaction {
 // Notification Interfaces
 
 export interface INotificationService {
-	notifyBidPlaced(bid: IBid): Promise<void>;
-	notifyAuctionStarted(auction: IAuction): Promise<void>;
-	notifyAuctionEnded(auction: IAuction, result: AuctionResult): Promise<void>;
-	notifyOutbid(bidder: IUser, auction: IAuction): Promise<void>;
+	notifyBidPlaced(bid: BidData): Promise<void>;
+	notifyAuctionStarted(auction: AuctionData): Promise<void>;
+	notifyAuctionEnded(
+		auction: AuctionData,
+		result: AuctionResult,
+	): Promise<void>;
+	notifyOutbid(bidder: UserData, auction: AuctionData): Promise<void>;
 	notifyAuctionExtended(
-		auction: IAuction,
+		auction: AuctionData,
 		newEndTime: TAuctionEndTime,
 	): Promise<void>;
-	notifyWinnerAnnounced(auction: IAuction, winner: IUser): Promise<void>;
+	notifyWinnerAnnounced(auction: AuctionData, winner: UserData): Promise<void>;
 	sendCustomNotification(
-		recipients: ReadonlyArray<TUserId>,
+		recipients: TUserId[],
 		message: NotificationMessage,
-	): Promise<void>;
+	): Promise<unknown>;
+	handleReconnect(
+		userId: TUserId,
+		auctionIds: TAuctionId[],
+		lastSeen: TTimestamp,
+	): Promise<unknown>;
+}
+
+// EventBus for pub/sub
+export interface IEventBus {
+	publish(topic: string, event: any): Promise<void>;
+	subscribe(topic: string, handler: (event: any) => void): Promise<void>;
+	replayEvents(
+		auctionId: TAuctionId,
+		from: TTimestamp,
+	): Promise<ReadonlyArray<any>>;
 }
 
 // Configuration Interfaces
@@ -482,6 +468,12 @@ export interface IAuctionConfig {
 	readonly maxPackageSize?: number;
 	readonly complementarityRules?: ReadonlyMap<string, number>;
 	readonly packageValuationMethod?: "additive" | "multiplicative" | "custom";
+}
+
+export interface AuctionConfig {
+	min_increment: TMinimumIncrement;
+	auto_extend: boolean;
+	// Extend for type-specific, e.g., decrement_rate: TPriceDrop for dutch
 }
 
 // Result Types
@@ -571,10 +563,10 @@ export interface UserUpdateRequest {
 
 export interface AuthenticationResult {
 	readonly success: boolean;
-	readonly user?: IUser;
+	readonly user?: UserData;
 	readonly token?: string;
 	readonly expiresAt?: TTimestamp;
-	readonly errors?: ReadonlyArray<string>;
+	readonly errors?: string[];
 }
 
 export interface NotificationMessage {

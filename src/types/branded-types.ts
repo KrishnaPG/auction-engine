@@ -148,3 +148,6 @@ export type TRefundAmount = Branded<number, "RefundAmount">;
 export type TEscrowAmount = Branded<number, "EscrowAmount">;
 export type TDepositAmount = Branded<number, "DepositAmount">;
 export type TGuaranteeAmount = Branded<number, "GuaranteeAmount">;
+
+// Idempotency
+export type TIdempotencyKey = Branded<string, "IdempotencyKey">;
