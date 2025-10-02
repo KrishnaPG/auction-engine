@@ -1,3 +1,4 @@
+/** biome-ignore-all lint/complexity/noStaticOnlyClass: namespace */
 import { sql } from "drizzle-orm";
 import { db } from "./drizzle-adapter";
 
@@ -5,7 +6,16 @@ export enum MaterializedViewName {
   BASE = 'mv_auction_bids_with_metadata',
   ENGLISH = 'mv_english_auction_bids',
   VICKREY = 'mv_vickrey_auction_bids',
-  MULTI_UNIT = 'mv_multi_unit_auction_bids'
+  MULTI_UNIT = 'mv_multi_unit_auction_bids',
+  DUTCH = 'mv_dutch_auction_bids',
+  SEALED_BID = 'mv_sealed_bid_auction_bids',
+  REVERSE = 'mv_reverse_auction_bids',
+  BUY_IT_NOW = 'mv_buy_it_now_auction_bids',
+  ALL_PAY = 'mv_all_pay_auction_bids',
+  JAPANESE = 'mv_japanese_auction_bids',
+  CHINESE = 'mv_chinese_auction_bids',
+  PENNY = 'mv_penny_auction_bids',
+  COMBINATORIAL = 'mv_combinatorial_auction_bids'
 }
 
 export class MaterializedViews {
@@ -55,20 +65,15 @@ export class MaterializedViews {
 		// Create index for the base materialized view
 		await db.execute(sql`
       CREATE INDEX IF NOT EXISTS idx_mv_auction_bids_auction_id ON mv_auction_bids_with_metadata(auction_id);
-    `);
-		await db.execute(sql`
+
       CREATE INDEX IF NOT EXISTS idx_mv_auction_bids_bidder_id ON mv_auction_bids_with_metadata(bidder_id);
-    `);
-		await db.execute(sql`
+
       CREATE INDEX IF NOT EXISTS idx_mv_auction_bids_amount ON mv_auction_bids_with_metadata(amount DESC);
-    `);
-		await db.execute(sql`
+
       CREATE INDEX IF NOT EXISTS idx_mv_auction_bids_timestamp ON mv_auction_bids_with_metadata(timestamp DESC);
-    `);
-		await db.execute(sql`
+
       CREATE INDEX IF NOT EXISTS idx_mv_auction_bids_auction_type ON mv_auction_bids_with_metadata(auction_type);
-    `);
-		await db.execute(sql`
+
       CREATE INDEX IF NOT EXISTS idx_mv_auction_bids_status ON mv_auction_bids_with_metadata(auction_status, bid_status);
     `);
 	}
@@ -128,11 +133,9 @@ export class MaterializedViews {
 		// Create indexes for English auction view
 		await db.execute(sql`
       CREATE INDEX IF NOT EXISTS idx_mv_english_auction_auction_id ON mv_english_auction_bids(auction_id);
-    `);
-		await db.execute(sql`
+
       CREATE INDEX IF NOT EXISTS idx_mv_english_auction_bid_rank ON mv_english_auction_bids(auction_id, bid_rank_within_auction);
-    `);
-		await db.execute(sql`
+
       CREATE INDEX IF NOT EXISTS idx_mv_english_auction_reserve_status ON mv_english_auction_bids(auction_id, reserve_status);
     `);
 	}
@@ -230,11 +233,9 @@ export class MaterializedViews {
 		// Create indexes for Vickrey auction view
 		await db.execute(sql`
       CREATE INDEX IF NOT EXISTS idx_mv_vickrey_auction_auction_id ON mv_vickrey_auction_bids(auction_id);
-    `);
-		await db.execute(sql`
+
       CREATE INDEX IF NOT EXISTS idx_mv_vickrey_auction_vickrey_rank ON mv_vickrey_auction_bids(auction_id, vickrey_rank);
-    `);
-		await db.execute(sql`
+
       CREATE INDEX IF NOT EXISTS idx_mv_vickrey_auction_position ON mv_vickrey_auction_bids(auction_id, vickrey_position);
     `);
 	}
@@ -344,13 +345,463 @@ export class MaterializedViews {
 		// Create indexes for Multi-unit auction view
 		await db.execute(sql`
       CREATE INDEX IF NOT EXISTS idx_mv_multi_unit_auction_auction_id ON mv_multi_unit_auction_bids(auction_id);
-    `);
-		await db.execute(sql`
+
       CREATE INDEX IF NOT EXISTS idx_mv_multi_unit_auction_allocation ON mv_multi_unit_auction_bids(auction_id, allocation_status);
-    `);
-		await db.execute(sql`
+
       CREATE INDEX IF NOT EXISTS idx_mv_multi_unit_auction_cumulative ON mv_multi_unit_auction_bids(auction_id, cumulative_quantity DESC);
     `);
+	}
+
+	// Dutch auction materialized view
+	static async createDutchAuctionView(): Promise<void> {
+		await db.execute(sql`
+	     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_dutch_auction_bids AS
+	     SELECT
+	       bid_id,
+	       auction_id,
+	       bidder_id,
+	       amount,
+	       quantity,
+	       timestamp,
+	       bid_status,
+	       is_winning,
+	       bid_version,
+	       auction_type,
+	       starting_price,
+	       reserve_price,
+	       min_increment,
+	       current_price,
+	       start_time,
+	       end_time,
+	       auction_status,
+	       auction_creator,
+	       auction_created_at,
+	       auction_updated_at,
+	       auction_config,
+	       bid_rank_within_auction,
+	       total_bids_in_auction,
+	       highest_bid_in_auction,
+	       lowest_bid_in_auction,
+	       average_bid_in_auction,
+	       CASE
+	         WHEN bid_status = 'winning' AND amount >= current_price THEN 'qualified'
+	         WHEN bid_status = 'winning' AND amount < current_price THEN 'disqualified'
+	         ELSE 'pending'
+	       END as dutch_status,
+	       EXTRACT(EPOCH FROM (end_time - timestamp)) as time_remaining
+	     FROM
+	       mv_auction_bids_with_metadata
+	     WHERE
+	       auction_type = 'dutch'
+	       AND auction_status IN ('active', 'completed')
+	       AND bid_status IN ('active', 'winning')
+	     WITH DATA;
+	   `);
+
+		// Create indexes for Dutch auction view
+		await db.execute(sql`
+	     CREATE INDEX IF NOT EXISTS idx_mv_dutch_auction_auction_id ON mv_dutch_auction_bids(auction_id);
+
+	     CREATE INDEX IF NOT EXISTS idx_mv_dutch_auction_dutch_status ON mv_dutch_auction_bids(auction_id, dutch_status);
+	   `);
+	}
+
+	// Sealed bid auction materialized view
+	static async createSealedBidAuctionView(): Promise<void> {
+		await db.execute(sql`
+	     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_sealed_bid_auction_bids AS
+	     SELECT
+	       bid_id,
+	       auction_id,
+	       bidder_id,
+	       amount,
+	       quantity,
+	       timestamp,
+	       bid_status,
+	       is_winning,
+	       bid_version,
+	       auction_type,
+	       starting_price,
+	       reserve_price,
+	       min_increment,
+	       current_price,
+	       start_time,
+	       end_time,
+	       auction_status,
+	       auction_creator,
+	       auction_created_at,
+	       auction_updated_at,
+	       auction_config,
+	       bid_rank_within_auction,
+	       total_bids_in_auction,
+	       highest_bid_in_auction,
+	       lowest_bid_in_auction,
+	       average_bid_in_auction,
+	       ROW_NUMBER() OVER (PARTITION BY auction_id ORDER BY amount DESC, timestamp ASC) as sealed_bid_rank
+	     FROM
+	       mv_auction_bids_with_metadata
+	     WHERE
+	       auction_type = 'sealed_bid'
+	       AND auction_status IN ('active', 'completed')
+	       AND bid_status = 'active'
+	     WITH DATA;
+	   `);
+
+		// Create indexes for Sealed bid auction view
+		await db.execute(sql`
+	     CREATE INDEX IF NOT EXISTS idx_mv_sealed_bid_auction_auction_id ON mv_sealed_bid_auction_bids(auction_id);
+
+	     CREATE INDEX IF NOT EXISTS idx_mv_sealed_bid_auction_rank ON mv_sealed_bid_auction_bids(auction_id, sealed_bid_rank);
+	   `);
+	}
+
+	// Reverse auction materialized view
+	static async createReverseAuctionView(): Promise<void> {
+		await db.execute(sql`
+	     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_reverse_auction_bids AS
+	     SELECT
+	       bid_id,
+	       auction_id,
+	       bidder_id,
+	       amount,
+	       quantity,
+	       timestamp,
+	       bid_status,
+	       is_winning,
+	       bid_version,
+	       auction_type,
+	       starting_price,
+	       reserve_price,
+	       min_increment,
+	       current_price,
+	       start_time,
+	       end_time,
+	       auction_status,
+	       auction_creator,
+	       auction_created_at,
+	       auction_updated_at,
+	       auction_config,
+	       bid_rank_within_auction,
+	       total_bids_in_auction,
+	       highest_bid_in_auction,
+	       lowest_bid_in_auction,
+	       average_bid_in_auction,
+	       ROW_NUMBER() OVER (PARTITION BY auction_id ORDER BY amount ASC, timestamp ASC) as reverse_rank,
+	       CASE
+	         WHEN amount <= reserve_price THEN 'meets_reserve'
+	         WHEN amount <= starting_price THEN 'below_start'
+	         ELSE 'above_start'
+	       END as price_status
+	     FROM
+	       mv_auction_bids_with_metadata
+	     WHERE
+	       auction_type = 'reverse'
+	       AND auction_status IN ('active', 'completed')
+	       AND bid_status = 'active'
+	     WITH DATA;
+	   `);
+
+		// Create indexes for Reverse auction view
+		await db.execute(sql`
+	     CREATE INDEX IF NOT EXISTS idx_mv_reverse_auction_auction_id ON mv_reverse_auction_bids(auction_id);
+	
+	     CREATE INDEX IF NOT EXISTS idx_mv_reverse_auction_rank ON mv_reverse_auction_bids(auction_id, reverse_rank);
+	   `);
+	}
+
+	// Buy It Now auction materialized view
+	static async createBuyItNowAuctionView(): Promise<void> {
+		await db.execute(sql`
+	     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_buy_it_now_auction_bids AS
+	     SELECT
+	       bid_id,
+	       auction_id,
+	       bidder_id,
+	       amount,
+	       quantity,
+	       timestamp,
+	       bid_status,
+	       is_winning,
+	       bid_version,
+	       auction_type,
+	       starting_price,
+	       reserve_price,
+	       min_increment,
+	       current_price,
+	       start_time,
+	       end_time,
+	       auction_status,
+	       auction_creator,
+	       auction_created_at,
+	       auction_updated_at,
+	       auction_config,
+	       bid_rank_within_auction,
+	       total_bids_in_auction,
+	       highest_bid_in_auction,
+	       lowest_bid_in_auction,
+	       average_bid_in_auction,
+	       CASE
+	         WHEN bid_status = 'winning' AND amount >= reserve_price THEN 'qualified_winner'
+	         WHEN bid_status = 'winning' AND amount < reserve_price THEN 'disqualified_winner'
+	         ELSE 'active_bid'
+	       END as buy_now_status
+	     FROM
+	       mv_auction_bids_with_metadata
+	     WHERE
+	       auction_type = 'buy_it_now'
+	       AND auction_status IN ('active', 'completed')
+	       AND bid_status IN ('active', 'winning')
+	     WITH DATA;
+	   `);
+
+		// Create indexes for Buy It Now auction view
+		await db.execute(sql`
+	     CREATE INDEX IF NOT EXISTS idx_mv_buy_it_now_auction_auction_id ON mv_buy_it_now_auction_bids(auction_id);
+
+	     CREATE INDEX IF NOT EXISTS idx_mv_buy_it_now_auction_status ON mv_buy_it_now_auction_bids(auction_id, buy_now_status);
+	   `);
+	}
+
+	// All Pay auction materialized view
+	static async createAllPayAuctionView(): Promise<void> {
+		await db.execute(sql`
+	     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_all_pay_auction_bids AS
+	     SELECT
+	       bid_id,
+	       auction_id,
+	       bidder_id,
+	       amount,
+	       quantity,
+	       timestamp,
+	       bid_status,
+	       is_winning,
+	       bid_version,
+	       auction_type,
+	       starting_price,
+	       reserve_price,
+	       min_increment,
+	       current_price,
+	       start_time,
+	       end_time,
+	       auction_status,
+	       auction_creator,
+	       auction_created_at,
+	       auction_updated_at,
+	       auction_config,
+	       bid_rank_within_auction,
+	       total_bids_in_auction,
+	       highest_bid_in_auction,
+	       lowest_bid_in_auction,
+	       average_bid_in_auction,
+	       ROW_NUMBER() OVER (PARTITION BY auction_id ORDER BY amount DESC, timestamp ASC) as all_pay_rank
+	     FROM
+	       mv_auction_bids_with_metadata
+	     WHERE
+	       auction_type = 'all_pay'
+	       AND auction_status IN ('active', 'completed')
+	       AND bid_status = 'active'
+	     WITH DATA;
+	   `);
+
+		// Create indexes for All Pay auction view
+		await db.execute(sql`
+	     CREATE INDEX IF NOT EXISTS idx_mv_all_pay_auction_auction_id ON mv_all_pay_auction_bids(auction_id);
+
+	     CREATE INDEX IF NOT EXISTS idx_mv_all_pay_auction_rank ON mv_all_pay_auction_bids(auction_id, all_pay_rank);
+	   `);
+	}
+
+	// Japanese auction materialized view
+	static async createJapaneseAuctionView(): Promise<void> {
+		await db.execute(sql`
+	     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_japanese_auction_bids AS
+	     SELECT
+	       bid_id,
+	       auction_id,
+	       bidder_id,
+	       amount,
+	       quantity,
+	       timestamp,
+	       bid_status,
+	       is_winning,
+	       bid_version,
+	       auction_type,
+	       starting_price,
+	       reserve_price,
+	       min_increment,
+	       current_price,
+	       start_time,
+	       end_time,
+	       auction_status,
+	       auction_creator,
+	       auction_created_at,
+	       auction_updated_at,
+	       auction_config,
+	       bid_rank_within_auction,
+	       total_bids_in_auction,
+	       highest_bid_in_auction,
+	       lowest_bid_in_auction,
+	       average_bid_in_auction,
+	       ROW_NUMBER() OVER (PARTITION BY auction_id ORDER BY timestamp DESC) as japanese_rank,
+	       EXTRACT(EPOCH FROM (end_time - timestamp)) as time_remaining
+	     FROM
+	       mv_auction_bids_with_metadata
+	     WHERE
+	       auction_type = 'japanese'
+	       AND auction_status IN ('active', 'completed')
+	       AND bid_status = 'active'
+	     WITH DATA;
+	   `);
+
+		// Create indexes for Japanese auction view
+		await db.execute(sql`
+	     CREATE INDEX IF NOT EXISTS idx_mv_japanese_auction_auction_id ON mv_japanese_auction_bids(auction_id);
+
+	     CREATE INDEX IF NOT EXISTS idx_mv_japanese_auction_rank ON mv_japanese_auction_bids(auction_id, japanese_rank);
+	   `);
+	}
+
+	// Chinese auction materialized view
+	static async createChineseAuctionView(): Promise<void> {
+		await db.execute(sql`
+	     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_chinese_auction_bids AS
+	     SELECT
+	       bid_id,
+	       auction_id,
+	       bidder_id,
+	       amount,
+	       quantity,
+	       timestamp,
+	       bid_status,
+	       is_winning,
+	       bid_version,
+	       auction_type,
+	       starting_price,
+	       reserve_price,
+	       min_increment,
+	       current_price,
+	       start_time,
+	       end_time,
+	       auction_status,
+	       auction_creator,
+	       auction_created_at,
+	       auction_updated_at,
+	       auction_config,
+	       bid_rank_within_auction,
+	       total_bids_in_auction,
+	       highest_bid_in_auction,
+	       lowest_bid_in_auction,
+	       average_bid_in_auction,
+	       ROW_NUMBER() OVER (PARTITION BY auction_id ORDER BY timestamp) as chinese_rank
+	     FROM
+	       mv_auction_bids_with_metadata
+	     WHERE
+	       auction_type = 'chinese'
+	       AND auction_status IN ('active', 'completed')
+	       AND bid_status = 'winning'
+	     WITH DATA;
+	   `);
+
+		// Create indexes for Chinese auction view
+		await db.execute(sql`
+	     CREATE INDEX IF NOT EXISTS idx_mv_chinese_auction_auction_id ON mv_chinese_auction_bids(auction_id);
+	   `);
+	}
+
+	// Penny auction materialized view
+	static async createPennyAuctionView(): Promise<void> {
+		await db.execute(sql`
+	     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_penny_auction_bids AS
+	     SELECT
+	       bid_id,
+	       auction_id,
+	       bidder_id,
+	       amount,
+	       quantity,
+	       timestamp,
+	       bid_status,
+	       is_winning,
+	       bid_version,
+	       auction_type,
+	       starting_price,
+	       reserve_price,
+	       min_increment,
+	       current_price,
+	       start_time,
+	       end_time,
+	       auction_status,
+	       auction_creator,
+	       auction_created_at,
+	       auction_updated_at,
+	       auction_config,
+	       bid_rank_within_auction,
+	       total_bids_in_auction,
+	       highest_bid_in_auction,
+	       lowest_bid_in_auction,
+	       average_bid_in_auction,
+	       ROW_NUMBER() OVER (PARTITION BY auction_id ORDER BY timestamp DESC) as penny_rank,
+	       amount * quantity as total_value
+	     FROM
+	       mv_auction_bids_with_metadata
+	     WHERE
+	       auction_type = 'penny'
+	       AND auction_status IN ('active', 'completed')
+	       AND bid_status = 'winning'
+	     WITH DATA;
+	   `);
+
+		// Create indexes for Penny auction view
+		await db.execute(sql`
+	     CREATE INDEX IF NOT EXISTS idx_mv_penny_auction_auction_id ON mv_penny_auction_bids(auction_id);
+	   `);
+	}
+
+	// Combinatorial auction materialized view
+	static async createCombinatorialAuctionView(): Promise<void> {
+		await db.execute(sql`
+	     CREATE MATERIALIZED VIEW IF NOT EXISTS mv_combinatorial_auction_bids AS
+	     SELECT
+	       bid_id,
+	       auction_id,
+	       bidder_id,
+	       amount,
+	       quantity,
+	       timestamp,
+	       bid_status,
+	       is_winning,
+	       bid_version,
+	       auction_type,
+	       starting_price,
+	       reserve_price,
+	       min_increment,
+	       current_price,
+	       start_time,
+	       end_time,
+	       auction_status,
+	       auction_creator,
+	       auction_created_at,
+	       auction_updated_at,
+	       auction_config,
+	       bid_rank_within_auction,
+	       total_bids_in_auction,
+	       highest_bid_in_auction,
+	       lowest_bid_in_auction,
+	       average_bid_in_auction,
+	       amount * quantity as total_value,
+	       ROW_NUMBER() OVER (PARTITION BY auction_id ORDER BY amount DESC, timestamp ASC) as combinatorial_rank
+	     FROM
+	       mv_auction_bids_with_metadata
+	     WHERE
+	       auction_type = 'combinatorial'
+	       AND auction_status IN ('active', 'completed')
+	       AND bid_status = 'active'
+	     WITH DATA;
+	   `);
+
+		// Create indexes for Combinatorial auction view
+		await db.execute(sql`
+	     CREATE INDEX IF NOT EXISTS idx_mv_combinatorial_auction_auction_id ON mv_combinatorial_auction_bids(auction_id);
+	   `);
 	}
 
 	// Create all materialized views
@@ -360,6 +811,15 @@ export class MaterializedViews {
 			await MaterializedViews.createEnglishAuctionView();
 			await MaterializedViews.createVickreyAuctionView();
 			await MaterializedViews.createMultiUnitAuctionView();
+			await MaterializedViews.createDutchAuctionView();
+			await MaterializedViews.createSealedBidAuctionView();
+			await MaterializedViews.createReverseAuctionView();
+			await MaterializedViews.createBuyItNowAuctionView();
+			await MaterializedViews.createAllPayAuctionView();
+			await MaterializedViews.createJapaneseAuctionView();
+			await MaterializedViews.createChineseAuctionView();
+			await MaterializedViews.createPennyAuctionView();
+			await MaterializedViews.createCombinatorialAuctionView();
 		} catch (error) {
 			console.error("Error creating materialized views:", error);
 			throw error;
