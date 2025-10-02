@@ -7,7 +7,6 @@ import type {
 	TUserId,
 } from "../../types/core-interfaces";
 import { AuctionType as TypeEnum } from "../../types/core-interfaces";
-// @ts-ignore
 import { db } from "../drizzle-adapter";
 import { auctions, bids } from "../schema";
 
@@ -101,7 +100,7 @@ export class WinnerQueries implements IWinnerQueries {
 					.orderBy(sql`${bids.amount} DESC, ${bids.timestamp} ASC`)
 					.limit(1);
 				const [result] = await vickreyQuery;
-				return result ? result.bidderId : null;
+				return result ? result.bidderId as TUserId : null;
 			}
 			case TypeEnum.BUY_IT_NOW:
 				query = db
@@ -201,7 +200,7 @@ export class WinnerQueries implements IWinnerQueries {
 					.orderBy(sql`${bids.amount} DESC, ${bids.timestamp} ASC`)
 					.limit(1); // Assume units in auctions
 				const results = await multiQuery;
-				return results[0]?.bidderId || null; // First winner
+				return results[0]?.bidderId as TUserId|| null; // First winner
 			}
 			case TypeEnum.COMBINATORIAL:
 				// Simplified greedy
@@ -236,7 +235,7 @@ export class WinnerQueries implements IWinnerQueries {
 			.where(eq(auctions.id, auctionId));
 		const winners = new Map<TUserId, TBidId>();
 		if (type.length === 0) return winners;
-		if (type[0].type === TypeEnum.MULTI_UNIT) {
+		if (type[0]!.type === TypeEnum.MULTI_UNIT) {
 			const results = await db
 				.select({ bidderId: bids.bidderId, id: bids.id })
 				.from(bids)
@@ -244,7 +243,7 @@ export class WinnerQueries implements IWinnerQueries {
 				.where(and(eq(auctions.id, auctionId), eq(bids.status, "active")))
 				.orderBy(sql`${bids.amount} DESC`)
 				.limit(5); // Assume 5 units
-			results.forEach((r: { bidderId: TUserId; id: TBidId }) => winners.set(r.bidderId, r.id));
+			results.forEach(r => winners.set(r.bidderId as TUserId, r.id as TBidId));
 		}
 		return winners;
 	}

@@ -1,5 +1,6 @@
 import { eq } from "drizzle-orm";
 import { validateBidAmount } from "../business-rules/validators/bid-validator"; // Assume
+import { db } from "../database/index";
 import { bids, outboxEvents } from "../database/schema";
 import type {
 	TAuctionId,
@@ -17,27 +18,19 @@ import type {
 	IAuctionQueries,
 	IBidQueries,
 	IBidService,
-	IDatabaseAdapter,
-	IOutboxRepository,
 	PlaceBidRequest,
 } from "../types/core-interfaces";
 
 export class BidService implements IBidService {
 	private bidQueries: IBidQueries;
 	private auctionQueries: IAuctionQueries; // For validation
-	private db: any;
-	private outboxRepo: IOutboxRepository;
 
 	constructor(
 		bidQueries: IBidQueries,
 		auctionQueries: IAuctionQueries,
-		db: any,
-		outboxRepo: IOutboxRepository,
 	) {
 		this.bidQueries = bidQueries;
 		this.auctionQueries = auctionQueries;
-		this.db = db;
-		this.outboxRepo = outboxRepo;
 	}
 
 	async placeBid(
@@ -48,11 +41,9 @@ export class BidService implements IBidService {
 		// Validate amount
 		validateBidAmount(bidReq.amount);
 
-		return this.db.executeInTransaction(async (tx) => {
+		return db.transaction(async (tx) => {
 			// Idempotency
-			const existing = await this.bidQueries.getByIdempotency(
-				idempotencyKey,
-			);
+			const existing = await this.bidQueries.getByIdempotency(idempotencyKey);
 			if (existing) return existing.id;
 
 			// Preconditions
@@ -71,13 +62,13 @@ export class BidService implements IBidService {
 
 			// Outbox
 			await tx.insert(outboxEvents).values({
-				event_type: "bid_placed",
+				eventType: "bid_placed",
 				payload: {
 					bidId: id,
 					auctionId: bidReq.auctionId,
 					amount: bidReq.amount,
 				},
-				created_at: Date.now(),
+				createdAt: new Date(),
 			});
 
 			return id;
@@ -87,18 +78,17 @@ export class BidService implements IBidService {
 	async retractBid(bidId: TBidId, reason: string): Promise<void> {
 		// Check can retract via query (status active, time < end - 5min, etc.)
 		const bid = await this.bidQueries.getBidData(bidId); // Assume
-		if (!bid || bid.status !== "active")
-			throw new Error("Cannot retract");
+		if (!bid || bid.status !== "active") throw new Error("Cannot retract");
 
-		this.db.executeInTransaction(async (tx) => {
+		db.transaction(async (tx) => {
 			await tx
 				.update(bids)
 				.set({ status: "retracted" })
 				.where(eq(bids.id, bidId));
 			await tx.insert(outboxEvents).values({
-				event_type: "bid_retracted",
+				eventType: "bid_retracted",
 				payload: { bidId, reason },
-				created_at: Date.now(),
+				createdAt: new Date(),
 			});
 		});
 	}
@@ -115,24 +105,19 @@ export class BidService implements IBidService {
 		};
 	}
 
-
-	getBidHistory(auctionId: TAuctionId): Promise<BidData[]>
-	{
+	getBidHistory(auctionId: TAuctionId): Promise<BidData[]> {
 		return this.bidQueries.getBidsByAuction(auctionId);
 	}
 
-	getUserBids(userId: TUserId): Promise<BidData[]>
-	{
+	getUserBids(userId: TUserId): Promise<BidData[]> {
 		return this.bidQueries.findBidsByBidder(userId);
 	}
 
-	getWinningBids(auctionId: TAuctionId): Promise<BidData[]>
-	{
+	getWinningBids(auctionId: TAuctionId): Promise<BidData[]> {
 		return this.bidQueries.getWinningBids(auctionId);
 	}
 
-	getBid(bidId: TBidId): Promise<BidData | null>
-	{
+	getBid(bidId: TBidId): Promise<BidData | null> {
 		return this.bidQueries.getBidData(bidId); // Assume
 	}
 }

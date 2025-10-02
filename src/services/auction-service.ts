@@ -1,42 +1,35 @@
 import { eq } from "drizzle-orm";
 import { validateAuctionConfig } from "../business-rules/validators/auction-config-validator";
-import { executeInTx } from "../database/drizzle-adapter";
-import { outbox } from "../database/schema";
+import { db } from "../database/index";
+import { auctions, outboxEvents } from "../database/schema";
 import type {
 	TAuctionId,
 	TIdempotencyKey,
 	TTimestamp,
 	TUserId,
 } from "../types/branded-types";
-import type {
-	AuctionData,
-	AuctionResult,
+import {
+	type AuctionData,
+	type AuctionResult,
 	AuctionStatus,
-	AuctionType,
-	CreateAuctionRequest,
-	IAuctionQueries,
-	IAuctionService,
-	IDatabaseAdapter,
-	IOutboxRepository,
-	IWinnerQueries,
+	type AuctionType,
+	type CreateAuctionRequest,
+	type Duration,
+	type IAuctionQueries,
+	type IAuctionService,
+	type IWinnerQueries,
 } from "../types/core-interfaces";
 
 export class AuctionService implements IAuctionService {
 	private auctionQueries: IAuctionQueries;
 	private winnerQueries: IWinnerQueries;
-	private db: any;
-	private outboxRepo: IOutboxRepository;
 
 	constructor(
 		auctionQueries: IAuctionQueries,
 		winnerQueries: IWinnerQueries,
-		db: any,
-		outboxRepo: IOutboxRepository,
 	) {
 		this.auctionQueries = auctionQueries;
 		this.winnerQueries = winnerQueries;
-		this.db = db;
-		this.outboxRepo = outboxRepo;
 	}
 
 	async createAuction(
@@ -54,38 +47,41 @@ export class AuctionService implements IAuctionService {
 			if (existingId) return existingId;
 		}
 
-		return this.db.executeInTransaction(async (tx) => {
+		return db.transaction(async (tx) => {
 			// Insert auction via query
 			const id = await this.auctionQueries.createAuction(tx, auctionReq);
-
+	
 			// Outbox insert
-			await tx.insert(outbox).values({
-				event_type: "auction_created",
+			await tx.insert(outboxEvents).values({
+				eventType: "auction_created",
+				auctionId: id,
 				payload: { auctionId: id, ...auctionReq },
-				idempotency_key: idempotencyKey,
-				created_at: Date.now() as TTimestamp,
+				createdAt: new Date(),
 			});
-
+	
 			return id;
 		});
 	}
 
 	async startAuction(auctionId: TAuctionId): Promise<void> {
-		const auction = await this.getAuction(auctionId);
+		const auction = await this.getAuctionData(auctionId);
 		if (!auction) throw new Error("Auction not found");
-		await auction.placeBid(null as any, this.auctionRepo, this.bidRepo); // Stub
+		// TODO: Implement auction start logic
+		console.log(`Starting auction ${auctionId}`);
 	}
 
 	async pauseAuction(auctionId: TAuctionId, reason: string): Promise<void> {
-		const auction = await this.getAuction(auctionId);
+		const auction = await this.getAuctionData(auctionId);
 		if (!auction) throw new Error("Auction not found");
-		await auction.pause(reason, this.auctionRepo);
+		// TODO: Implement auction pause logic
+		console.log(`Pausing auction ${auctionId} with reason: ${reason}`);
 	}
 
 	async resumeAuction(auctionId: TAuctionId): Promise<void> {
-		const auction = await this.getAuction(auctionId);
+		const auction = await this.getAuctionData(auctionId);
 		if (!auction) throw new Error("Auction not found");
-		await auction.resume(this.auctionRepo);
+		// TODO: Implement auction resume logic
+		console.log(`Resuming auction ${auctionId}`);
 	}
 
 	async endAuction(id: TAuctionId): Promise<AuctionResult> {
@@ -93,31 +89,32 @@ export class AuctionService implements IAuctionService {
 		if (status !== AuctionStatus.ACTIVE)
 			throw new Error("Cannot end non-active auction");
 
-		return this.db.executeInTransaction(async (tx) => {
+		return db.transaction(async (tx) => {
 			// Update status
 			await tx
 				.update(auctions)
 				.set({ status: AuctionStatus.COMPLETED })
 				.where(eq(auctions.id, id));
-
+		
 			// Determine winner
-			const type = await this.auctionQueries.getType(id); // Assume method
+			const type = await this.auctionQueries.getAuctionType(id);
 			const winnerId = await this.winnerQueries.determineWinner(tx, id, type);
 			const finalPrice = await this.auctionQueries.getCurrentPrice(id, type);
-
+		
 			// Outbox
-			await tx.insert(outbox).values({
-				event_type: "auction_ended",
+			await tx.insert(outboxEvents).values({
+				eventType: "auction_ended",
+				auctionId: id,
 				payload: { auctionId: id, winnerId, finalPrice },
-				created_at: Date.now() as TTimestamp,
+				createdAt: new Date(),
 			});
-
+		
 			return {
 				auctionId: id,
-				winnerId,
-				winningBidId: null, // From winner query if needed
+				winnerId: winnerId || undefined,
+				winningBidId: undefined, // From winner query if needed
 				finalPrice,
-				totalBids: await this.auctionQueries.getBidCount(id), // Assume
+				totalBids: await this.auctionQueries.getBidCount(id),
 				endedAt: Date.now() as TTimestamp,
 				resultType: winnerId ? "sold" : "no_bids",
 			};
@@ -125,18 +122,20 @@ export class AuctionService implements IAuctionService {
 	}
 
 	async cancelAuction(auctionId: TAuctionId, reason: string): Promise<void> {
-		const auction = await this.getAuction(auctionId);
+		const auction = await this.getAuctionData(auctionId);
 		if (!auction) throw new Error("Auction not found");
-		await auction.cancel(reason, this.auctionRepo);
+		// TODO: Implement auction cancel logic
+		console.log(`Canceling auction ${auctionId} with reason: ${reason}`);
 	}
 
 	async extendAuction(
 		auctionId: TAuctionId,
-		duration: Duration,
+		duration: number,
 	): Promise<void> {
-		const auction = await this.getAuction(auctionId);
+		const auction = await this.getAuctionData(auctionId);
 		if (!auction) throw new Error("Auction not found");
-		await auction.extend(duration, this.auctionRepo);
+		// TODO: Implement auction extend logic
+		console.log(`Extending auction ${auctionId} by ${duration}ms`);
 	}
 
 	async getAuctionData(id: TAuctionId): Promise<AuctionData | null> {
@@ -144,7 +143,7 @@ export class AuctionService implements IAuctionService {
 	}
 
 	async findAuctionsByStatus(status: AuctionStatus): Promise<AuctionData[]> {
-		return this.auctionQueries.findAuctionsByStatus(status); // Assume method or criteria
+		return this.auctionQueries.findAuctionsByStatus(status);
 	}
 
 	async findAuctionsByType(type: AuctionType): Promise<AuctionData[]> {

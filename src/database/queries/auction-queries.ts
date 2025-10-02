@@ -16,7 +16,7 @@ import type {
 	Tx,
 } from "../../types/core-interfaces";
 import { AuctionStatus as StatusEnum } from "../../types/core-interfaces";
-import { db } from "../index";
+import { db } from "../drizzle-adapter";
 import { auctionConfigurations, auctions, bids, outboxEvents } from "../schema";
 
 export class AuctionQueries implements IAuctionQueries {

@@ -208,7 +208,7 @@ export interface CreateAuctionRequest {
 	readonly startTime: TAuctionStartTime;
 	readonly endTime: TAuctionEndTime;
 	readonly items: ReadonlyArray<CreateItemRequest>;
-	readonly configurations: ReadonlyMap<string, any>;
+	readonly configurations: ReadonlyMap<string, unknown>;
 	readonly createdBy: TUserId;
 	idempotencyKey?: TIdempotencyKey;
 }

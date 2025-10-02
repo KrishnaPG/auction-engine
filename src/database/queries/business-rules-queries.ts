@@ -9,7 +9,7 @@ import type {
 	TUserId,
 	TValidationStatus,
 } from "../../types/branded-types";
-import { db } from "../index";
+import { db } from "../drizzle-adapter";
 import {
 	auctionConfigurations,
 	auctions,
@@ -72,7 +72,7 @@ export interface RuleViolationRequest {
 // Query class for business rules operations
 export class BusinessRulesQueries {
 	// INSERT into rules table with JSON validation_rules
-	async createRule(request: CreateRuleRequest): Promise<TRuleId> {
+	async createRule(request: CreateRuleRequest): Promise<TRuleId|undefined> {
 		const [result] = await db
 			.insert(rules)
 			.values({
@@ -94,7 +94,7 @@ export class BusinessRulesQueries {
 				effectiveUntil: request.effectiveUntil,
 			})
 			.returning({ ruleId: rules.ruleId });
-		return result.ruleId;
+		return result?.ruleId as TRuleId;
 	}
 
 	// SELECT config_value FROM auction_configurations WHERE auction_id=? AND config_key='rules'
@@ -152,7 +152,7 @@ export class BusinessRulesQueries {
 	// Create rule configuration
 	async createRuleConfiguration(
 		request: RuleConfigurationRequest,
-	): Promise<string> {
+	): Promise<string | undefined> {
 		const [newConfig] = await db
 			.insert(ruleConfigurations)
 			.values({
@@ -171,7 +171,7 @@ export class BusinessRulesQueries {
 			})
 			.returning({ configId: ruleConfigurations.configId });
 
-		return newConfig.configId;
+		return newConfig?.configId;
 	}
 
 	// Get rule configurations for an auction
@@ -204,7 +204,7 @@ export class BusinessRulesQueries {
 	}
 
 	// Record rule violation
-	async recordRuleViolation(request: RuleViolationRequest): Promise<string> {
+	async recordRuleViolation(request: RuleViolationRequest): Promise<string|undefined> {
 		const [newViolation] = await db
 			.insert(ruleViolations)
 			.values({
@@ -227,7 +227,7 @@ export class BusinessRulesQueries {
 			})
 			.returning({ violationId: ruleViolations.violationId });
 
-		return newViolation.violationId;
+		return newViolation?.violationId;
 	}
 
 	// Get rule violations for an auction

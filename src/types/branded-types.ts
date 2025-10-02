@@ -67,9 +67,9 @@ export type TPriority = Branded<number, "Priority">;
 // Auction Type-Specific Branded Types
 
 // English Auction Types
-export type TCurrentPrice = Branded<number, "CurrentPrice">;
-export type TMinimumBid = Branded<number, "MinimumBid">;
-export type TWinningBid = Branded<number, "WinningBid">;
+export type TCurrentPrice = Branded<Money, "CurrentPrice">;
+export type TMinimumBid = Branded<Money, "MinimumBid">;
+export type TWinningBid = Branded<Money, "WinningBid">;
 
 // Price trajectory for Dutch auctions
 export type TPriceDrop = Branded<number, "PriceDrop">;
