@@ -2,8 +2,6 @@
 
 // Auction lifecycle helpers
 export * from "./auction-helpers";
-// Bid processing utilities
-export * from "./bid-helpers";
 // Constants and configuration
 export * from "./constants";
 // Re-export commonly used utilities for convenience
@@ -20,15 +18,5 @@ export {
 	TIME_EXTENSION,
 	USER_ROLES,
 } from "./constants";
-// Type-safe helper functions
-export * from "./type-safe-helpers";
-
-export {
-	TYPE_SAFE_LIMITS,
-	TypeSafeArithmetic,
-	TypeSafeAuctionHelpers,
-	TypeSafeComparisons,
-	TypeSafeErrorMessages,
-	TypeSafeFormatting,
-	TypeSafeValidation,
-} from "./type-safe-helpers";
+// Materialized view refresh utilities
+export * from "./materialized-view-refresh";
