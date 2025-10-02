@@ -204,7 +204,7 @@ export interface CreateAuctionRequest {
 	readonly type: AuctionType;
 	readonly startingPrice: Money;
 	readonly reservePrice?: Money;
-	readonly minBidIncrement: Money;
+	readonly minIncrement: Money;
 	readonly startTime: TAuctionStartTime;
 	readonly endTime: TAuctionEndTime;
 	readonly items: ReadonlyArray<CreateItemRequest>;
@@ -380,34 +380,34 @@ export interface IUserService {
 
 // Database Interfaces
 
-export interface IDatabaseAdapter {
-	connect(): Promise<void>;
-	disconnect(): Promise<void>;
-	isConnected(): boolean;
+// export interface IDatabaseAdapter {
+// 	connect(): Promise<void>;
+// 	disconnect(): Promise<void>;
+// 	isConnected(): boolean;
 
-	query<T = any>(sql: string, params?: readonly any[]): Promise<T[]>;
-	queryOne<T = any>(sql: string, params?: any[]): Promise<T | null>;
-	queryValue<T = any>(sql: string, params?: any[]): Promise<T>;
+// 	query<T = any>(sql: string, params?: readonly any[]): Promise<T[]>;
+// 	queryOne<T = any>(sql: string, params?: any[]): Promise<T | null>;
+// 	queryValue<T = any>(sql: string, params?: any[]): Promise<T>;
 
-	beginTransaction(): Promise<ITransaction>;
-	executeInTransaction<T>(
-		operation: (tx: ITransaction) => Promise<T>,
-	): Promise<T>;
+// 	beginTransaction(): Promise<ITransaction>;
+// 	executeInTransaction<T>(
+// 		operation: (tx: ITransaction) => Promise<T>,
+// 	): Promise<T>;
 
-	migrate(): Promise<void>;
-	rollback(steps: number): Promise<void>;
-	healthCheck(): Promise<DatabaseHealth>;
-}
+// 	migrate(): Promise<void>;
+// 	rollback(steps: number): Promise<void>;
+// 	healthCheck(): Promise<DatabaseHealth>;
+// }
 
-export interface ITransaction {
-	query<T = any>(sql: string, params?: readonly any[]): Promise<T[]>;
-	queryOne<T = any>(sql: string, params?: readonly any[]): Promise<T | null>;
-	insert(table: any): { values(data: any): Promise<any> };
-	update(table: any): { set(data: any): { where(condition: any): Promise<void> } };
-	commit(): Promise<void>;
-	rollback(): Promise<void>;
-	isActive(): boolean;
-}
+// export interface ITransaction {
+// 	query<T = any>(sql: string, params?: readonly any[]): Promise<T[]>;
+// 	queryOne<T = any>(sql: string, params?: readonly any[]): Promise<T | null>;
+// 	insert(table: any): { values(data: any): Promise<any> };
+// 	update(table: any): { set(data: any): { where(condition: any): Promise<void> } };
+// 	commit(): Promise<void>;
+// 	rollback(): Promise<void>;
+// 	isActive(): boolean;
+// }
 
 // Notification Interfaces
 

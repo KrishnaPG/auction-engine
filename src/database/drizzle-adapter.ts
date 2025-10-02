@@ -1,7 +1,16 @@
 // Drizzle ORM Database Adapter Implementation
 
 import "dotenv/config";
-import type { drizzle } from "drizzle-orm/node-postgres";
+import { drizzle } from "drizzle-orm/node-postgres";
+import {
+	auctionConfigurations,
+	auctions,
+	bids,
+	outboxEvents,
+	ruleConfigurations,
+	rules,
+	ruleViolations,
+} from "../schema";
 import { createTimestamp } from "../types/branded-constructors";
 import type { TTimestamp } from "../types/branded-types";
 import { BaseDatabaseAdapter, BaseTransaction } from "./base-adapter";
@@ -182,9 +191,44 @@ export class DrizzleAdapter
 
 	private async connectPostgreSQL(): Promise<void> {
 		const config = this.config as any; // PostgreSQLConfig
-		// Initialize Drizzle with PostgreSQL
-		// This would use the actual Drizzle PostgreSQL driver
-		throw new Error("PostgreSQL Drizzle connection not yet implemented");
+
+		// Import PostgreSQL driver
+		const { Pool } = await import("pg");
+
+		// Create connection pool with placeholder config
+		const pool = new Pool({
+			host: config.host || "localhost",
+			port: config.port || 5432,
+			database: config.database || "auction_db",
+			user: config.username || "postgres",
+			password: config.password || "password",
+			max: 10,
+			idleTimeoutMillis: 30000,
+			connectionTimeoutMillis: 2000,
+		});
+
+		// Test connection
+		try {
+			await pool.query("SELECT 1");
+		} catch (error) {
+			await pool.end();
+			throw new Error(
+				`PostgreSQL connection failed: ${(error as Error).message}`,
+			);
+		}
+
+		// Initialize Drizzle with PostgreSQL client and schema
+		this.db = drizzle(pool, {
+			schema: {
+				auctions,
+				bids,
+				outboxEvents,
+				auctionConfigurations,
+				rules,
+				ruleConfigurations,
+				ruleViolations
+			}
+		});
 	}
 
 	private async connectMySQL(): Promise<void> {
@@ -306,7 +350,9 @@ class DrizzleTransaction extends BaseTransaction {
 		};
 	}
 
-	public update(table: any): { set(data: any): { where(condition: any): Promise<void> } } {
+	public update(table: any): {
+		set(data: any): { where(condition: any): Promise<void> };
+	} {
 		return {
 			set: (data: any) => ({
 				where: async (condition: any) => {
@@ -500,7 +546,8 @@ export class DrizzleQueryBuilder<T extends Record<string, any>> {
 	}
 
 	private buildSelectSQL(): { sql: string; params: readonly any[] } {
-		const fieldList = this.selectedFields.length > 0 ? this.selectedFields.join(", ") : "*";
+		const fieldList =
+			this.selectedFields.length > 0 ? this.selectedFields.join(", ") : "*";
 		let sql = `SELECT ${fieldList} FROM ${this.tableName}`;
 
 		if (this.conditions.length > 0) {
@@ -510,6 +557,22 @@ export class DrizzleQueryBuilder<T extends Record<string, any>> {
 		if (this.orderByFields.length > 0) {
 			sql += ` ORDER BY ${this.orderByFields.join(", ")}`;
 		}
+		
+		// Singleton instance
+		const drizzleAdapter = new DrizzleAdapter({
+			type: "postgresql",
+			host: process.env.DB_HOST || "localhost",
+			port: parseInt(process.env.DB_PORT || "5432"),
+			database: process.env.DB_NAME || "auction_db",
+			username: process.env.DB_USER || "postgres",
+			password: process.env.DB_PASSWORD || "password",
+		});
+		
+		// Connect on import
+		drizzleAdapter.connect().catch(console.error);
+		
+		// Export database instance for queries
+		export const db = drizzleAdapter.getDrizzle();
 
 		if (this.limitCount) {
 			sql += ` LIMIT ${this.limitCount}`;

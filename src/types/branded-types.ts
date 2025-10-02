@@ -112,6 +112,7 @@ export type TRapidBidThreshold = Branded<number, "RapidBidThreshold">;
 
 // Business Rules Branded Types
 export type TRuleId = Branded<string, "RuleId">;
+export type TRuleCode = Branded<string, "RuleCode">;
 export type TRuleCategory = Branded<string, "RuleCategory">;
 export type TRuleSeverity = Branded<string, "RuleSeverity">;
 

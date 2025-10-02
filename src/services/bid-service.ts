@@ -25,18 +25,18 @@ import type {
 export class BidService implements IBidService {
 	private bidQueries: IBidQueries;
 	private auctionQueries: IAuctionQueries; // For validation
-	private dbAdapter: IDatabaseAdapter;
+	private db: any;
 	private outboxRepo: IOutboxRepository;
 
 	constructor(
 		bidQueries: IBidQueries,
 		auctionQueries: IAuctionQueries,
-		dbAdapter: IDatabaseAdapter,
+		db: any,
 		outboxRepo: IOutboxRepository,
 	) {
 		this.bidQueries = bidQueries;
 		this.auctionQueries = auctionQueries;
-		this.dbAdapter = dbAdapter;
+		this.db = db;
 		this.outboxRepo = outboxRepo;
 	}
 
@@ -48,7 +48,7 @@ export class BidService implements IBidService {
 		// Validate amount
 		validateBidAmount(bidReq.amount);
 
-		return this.dbAdapter.executeInTransaction(async (tx) => {
+		return this.db.executeInTransaction(async (tx) => {
 			// Idempotency
 			const existing = await this.bidQueries.getByIdempotency(
 				idempotencyKey,
@@ -77,7 +77,7 @@ export class BidService implements IBidService {
 					auctionId: bidReq.auctionId,
 					amount: bidReq.amount,
 				},
-				created_at: Date.now() as TTimestamp,
+				created_at: Date.now(),
 			});
 
 			return id;
@@ -90,7 +90,7 @@ export class BidService implements IBidService {
 		if (!bid || bid.status !== "active")
 			throw new Error("Cannot retract");
 
-		this.dbAdapter.executeInTransaction(async (tx) => {
+		this.db.executeInTransaction(async (tx) => {
 			await tx
 				.update(bids)
 				.set({ status: "retracted" })
@@ -98,7 +98,7 @@ export class BidService implements IBidService {
 			await tx.insert(outboxEvents).values({
 				event_type: "bid_retracted",
 				payload: { bidId, reason },
-				created_at: Date.now() as TTimestamp,
+				created_at: Date.now(),
 			});
 		});
 	}

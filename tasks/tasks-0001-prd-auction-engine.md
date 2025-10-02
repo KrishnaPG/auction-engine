@@ -20,7 +20,8 @@ This project delivers a comprehensive reusable auction engine supporting all 13 
 - `src/types/auction.ts` - Auction-specific type definitions.
 - `src/types/bid.ts` - Bid-specific type definitions.
 - `src/types/business-rules.ts` - Business rules configuration types.
-- `src/database/schema.sql` - Database schema definitions for multiple SQL databases.
+- `src/types/branded-types.ts` - Branded types including rule-related types like TRuleId, TRuleCode for type safety.
+- `src/database/schema.ts` - Database schema definitions including new tables for rules, rule_configurations, and rule_violations.
 - `src/database/migrations/` - Database migration files.
 - `src/database/connection.ts` - Database connection and abstraction layer.
 - `src/database/queries/` - SQL query builders for winner determination.
@@ -41,6 +42,8 @@ This project delivers a comprehensive reusable auction engine supporting all 13 
 - `src/auction-types/combinatorial-auction.ts` - Combinatorial auction implementation.
 - `src/business-rules/engine.ts` - Business rules validation engine.
 - `src/business-rules/validators/` - Individual rule validators.
+- `src/database/queries/business-rules-queries.ts` - SQL query wrappers for business rules CRUD and auction-specific configurations.
+- `src/services/business-rules-service.ts` - Thin service layer for business rules validation, loading, and transaction execution with branded types.
 - `src/bid/bid-manager.ts` - Bid processing and management.
 - `src/bid/bid-validator.ts` - Bid validation logic.
 - `src/winner-determination/service.ts` - Winner determination service.
@@ -129,7 +132,7 @@ This project delivers a comprehensive reusable auction engine supporting all 13 
   - [ ] 2.16 Create auction lifecycle management: UPDATE auctions SET status=? WHERE id=? in tx, with outbox inserts for 'started'/'ended'/'cancelled'; Drizzle wrapper integrating status CASE queries and idempotency checks.
 
 - [ ] 3.0 Business Rules Engine
-  - [ ] 3.1 Design business rules configuration system: INSERT into rules table with JSON validation_rules, query via SELECT config_value FROM auction_configurations WHERE auction_id=? AND config_key='rules'; thin service for loading branded rule objects.
+  - [x] 3.1 Design business rules configuration system: INSERT into rules table with JSON validation_rules, query via SELECT config_value FROM auction_configurations WHERE auction_id=? AND config_key='rules'; thin service for loading branded rule objects.
   - [ ] 3.2 Implement SQL validation for min bid: SELECT CASE WHEN amount < (SELECT min_increment FROM auctions WHERE id=?) THEN 'invalid' ELSE 'valid' END; Drizzle wrapper in src/database/queries/validation-queries.ts calling from thin JS validator with branded Money inputs.
   - [ ] 3.3 Implement SQL validation for maximum bids per user: SELECT COUNT(*) FROM bids WHERE auction_id=? AND user_id=? AND status='active' > max_bids; Drizzle query with parameterized limits, integrated in bid service tx.
   - [ ] 3.4 Implement SQL validation for bid retraction time limit: SELECT CASE WHEN submitted_at > NOW() - retraction_window THEN 'allowed' ELSE 'expired' END FROM bids WHERE id=?; Drizzle wrapper with outbox for retraction events.

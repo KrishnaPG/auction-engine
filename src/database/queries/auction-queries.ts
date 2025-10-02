@@ -8,7 +8,6 @@ import type {
 	AuctionType,
 	CreateAuctionRequest,
 	IAuctionQueries,
-	IDatabaseAdapter,
 	QueryCriteria,
 	TAuctionId,
 	TBidAmount,
@@ -17,35 +16,26 @@ import type {
 	Tx,
 } from "../../types/core-interfaces";
 import { AuctionStatus as StatusEnum } from "../../types/core-interfaces";
+import { db } from "../index";
 import { auctionConfigurations, auctions, bids, outboxEvents } from "../schema";
 
 export class AuctionQueries implements IAuctionQueries {
-	private db: IDatabaseAdapter;
-
-	constructor(db: IDatabaseAdapter) {
-		this.db = db;
-	}
 
 	async getAuctionData(id: TAuctionId): Promise<AuctionData | null> {
-		const drizzle = this.db.getDrizzle();
-		const [data] = await drizzle
-			.select()
-			.from(auctions)
-			.where(eq(auctions.id, id));
+		const [data] = await db.select().from(auctions).where(eq(auctions.id, id));
 		if (!data) return null;
 		data.status = await this.getStatus(id);
-		return data as AuctionData;
+		return data as unknown as AuctionData;
 	}
 
 	async getCurrentPrice(
 		auctionId: TAuctionId,
 		type: AuctionType,
 	): Promise<TCurrentPrice> {
-		const drizzle = this.db.getDrizzle();
-		let query;
+		let query: any;
 		switch (type) {
 			case "english":
-				query = drizzle
+				query = db
 					.select({
 						price: sql<number>`COALESCE(MAX(${bids.amount}), ${auctions.startingPrice})`,
 					})
@@ -54,7 +44,7 @@ export class AuctionQueries implements IAuctionQueries {
 					.where(eq(auctions.id, auctionId));
 				break;
 			case "dutch":
-				query = drizzle
+				query = db
 					.select({
 						price: sql<number>`GREATEST(${auctions.startingPrice} - (EXTRACT(EPOCH FROM (NOW() - ${auctions.startTime})) * ${auctions.minIncrement}), ${auctions.reservePrice})`,
 					})
@@ -62,7 +52,7 @@ export class AuctionQueries implements IAuctionQueries {
 					.where(eq(auctions.id, auctionId));
 				break;
 			case "reverse":
-				query = drizzle
+				query = db
 					.select({
 						price: sql<number>`COALESCE(MIN(${bids.amount}), ${auctions.startingPrice})`,
 					})
@@ -71,7 +61,7 @@ export class AuctionQueries implements IAuctionQueries {
 					.where(eq(auctions.id, auctionId));
 				break;
 			case "vickrey":
-				query = drizzle
+				query = db
 					.select({
 						price: sql<number>`(
 							SELECT amount FROM (
@@ -84,7 +74,7 @@ export class AuctionQueries implements IAuctionQueries {
 					.where(eq(auctions.id, auctionId));
 				break;
 			case "buy_it_now":
-				query = drizzle
+				query = db
 					.select({
 						price: sql<number>`COALESCE(MAX(${bids.amount}), ${auctions.startingPrice})`,
 					})
@@ -93,7 +83,7 @@ export class AuctionQueries implements IAuctionQueries {
 					.where(eq(auctions.id, auctionId));
 				break;
 			case "double":
-				query = drizzle
+				query = db
 					.select({
 						price: sql<number>`(
 							SELECT COALESCE(
@@ -106,18 +96,18 @@ export class AuctionQueries implements IAuctionQueries {
 					.where(eq(auctions.id, auctionId));
 				break;
 			default:
-				query = drizzle
+				query = db
 					.select({ price: auctions.currentPrice })
 					.from(auctions)
 					.where(eq(auctions.id, auctionId));
 		}
 		const [result] = await query;
+		if (!result) throw new Error("No result found for current price");
 		return brand<TCurrentPrice>(result.price);
 	}
 
 	async getStatus(id: TAuctionId): Promise<AuctionStatus> {
-		const drizzle = this.db.getDrizzle();
-		const [result] = await drizzle
+		const [result] = await db
 			.select({
 				status: sql<AuctionStatus>`CASE
 					WHEN ${auctions.startTime} > NOW() THEN ${StatusEnum.SCHEDULED}
@@ -128,6 +118,7 @@ export class AuctionQueries implements IAuctionQueries {
 			})
 			.from(auctions)
 			.where(eq(auctions.id, id));
+		if (!result) throw new Error("No result found for status");
 		return result.status;
 	}
 
@@ -139,59 +130,53 @@ export class AuctionQueries implements IAuctionQueries {
 		if (status !== StatusEnum.ACTIVE) return false;
 		const type = await this.getType(auctionId);
 		const currentPrice = await this.getCurrentPrice(auctionId, type);
-		const drizzle = this.db.getDrizzle();
-		const [auction] = await drizzle
+		const [auction] = await db
 			.select({ minIncrement: auctions.minIncrement })
 			.from(auctions)
 			.where(eq(auctions.id, auctionId));
-		return amount > currentPrice + auction.minIncrement;
+		if (!auction) throw new Error("Auction not found");
+		return amount.value > currentPrice + Number(auction.minIncrement);
 	}
 
-	async createAuction(tx: Tx, req: CreateAuctionRequest): Promise<TAuctionId> {
+	async createAuction(req: CreateAuctionRequest): Promise<TAuctionId> {
 		if (req.idempotencyKey) {
 			const existing = await this.getByIdempotency(req.idempotencyKey);
 			if (existing) return existing;
 		}
-		const drizzle = this.db.getDrizzle();
-		const [result] = await drizzle
+		const [result] = await db
 			.insert(auctions)
 			.values({
-				title: req.title,
-				description: req.description,
-				type: req.type,
-				startingPrice: req.startingPrice.amount,
-				reservePrice: req.reservePrice?.amount,
-				minIncrement: req.minBidIncrement.amount,
-				startTime: req.startTime,
-				endTime: req.endTime,
-				createdBy: req.createdBy,
+				...req,
+				startingPrice: req.startingPrice.toString(),
+				reservePrice: req.reservePrice?.toString(),
+				minIncrement: req.minIncrement.toString(),
+				startTime: new Date(req.startTime),
+				endTime: new Date(req.endTime),
 				status: StatusEnum.DRAFT,
 				version: 1,
-				idempotencyKey: req.idempotencyKey,
 			})
 			.returning({ id: auctions.id });
+		if (!result) throw new Error("Failed to create auction");
 		return brand<TAuctionId>(result.id);
 	}
 
 	async updateAuction(
-		tx: Tx,
+		tx: any,
 		id: TAuctionId,
 		updates: Partial<AuctionData>,
 	): Promise<void> {
-		const drizzle = this.db.getDrizzle();
-		await drizzle
+		await tx
 			.update(auctions)
 			.set({ ...updates, updatedAt: new Date() })
 			.where(eq(auctions.id, id));
 	}
 
 	async setAuctionConfig(
-		tx: Tx,
+		tx: any,
 		auctionId: TAuctionId,
 		config: AuctionConfig,
 	): Promise<void> {
-		const drizzle = this.db.getDrizzle();
-		await drizzle
+		await tx
 			.insert(auctionConfigurations)
 			.values({
 				auctionId,
@@ -204,17 +189,17 @@ export class AuctionQueries implements IAuctionQueries {
 	}
 
 	async updateAuctionStatus(
-		tx: Tx,
+		tx: any,
 		auctionId: TAuctionId,
 		newStatus: AuctionStatus,
 		reason?: string,
 	): Promise<void> {
-		const drizzle = this.db.getDrizzle();
-		const [auction] = await drizzle
+		const [auction] = await tx
 			.select({ version: auctions.version })
 			.from(auctions)
 			.where(eq(auctions.id, auctionId));
-		await drizzle
+		if (!auction) throw new Error("Auction not found");
+		await tx
 			.update(auctions)
 			.set({
 				status: newStatus,
@@ -222,7 +207,7 @@ export class AuctionQueries implements IAuctionQueries {
 				version: (auction.version || 0) + 1,
 			})
 			.where(eq(auctions.id, auctionId));
-		await drizzle.insert(outboxEvents).values({
+		await tx.insert(outboxEvents).values({
 			eventType: "status_changed",
 			auctionId,
 			payload: { auctionId, status: newStatus, reason } as any,
@@ -230,12 +215,11 @@ export class AuctionQueries implements IAuctionQueries {
 	}
 
 	async findAuctions(criteria?: QueryCriteria): Promise<AuctionData[]> {
-		const drizzle = this.db.getDrizzle();
-		let query = drizzle.select().from(auctions);
+		let query = db.select().from(auctions);
 		if (criteria?.filters) {
 			criteria.filters.forEach((f) => {
 				if (f.field === "status" && f.operator === "equals")
-					query = query.where(eq(sql`status`, f.value));
+					query = query.where(eq(auctions.status, f.value));
 			});
 		}
 		if (criteria?.pagination) {
@@ -244,9 +228,10 @@ export class AuctionQueries implements IAuctionQueries {
 				.offset(criteria.pagination.offset || 0);
 		}
 		const results = await query;
-		return Promise.all(
+		const auctionData = await Promise.all(
 			results.map((r) => this.getAuctionData(brand<TAuctionId>(r.id))),
 		);
+		return auctionData.filter((data): data is AuctionData => data !== null);
 	}
 
 	async findActiveAuctions(): Promise<AuctionData[]> {
@@ -258,48 +243,47 @@ export class AuctionQueries implements IAuctionQueries {
 	}
 
 	async findAuctionsByType(type: AuctionType): Promise<AuctionData[]> {
-		const drizzle = this.db.getDrizzle();
-		const results = await drizzle
+		const results = await db
 			.select()
 			.from(auctions)
 			.where(eq(auctions.type, type));
-		return Promise.all(
+		const auctionData = await Promise.all(
 			results.map((r) => this.getAuctionData(brand<TAuctionId>(r.id))),
 		);
+		return auctionData.filter((data): data is AuctionData => data !== null);
 	}
 
 	async findAuctionsByCreator(creatorId: TUserId): Promise<AuctionData[]> {
-		const drizzle = this.db.getDrizzle();
-		const results = await drizzle
+		const results = await db
 			.select()
 			.from(auctions)
 			.where(eq(auctions.createdBy, creatorId));
-		return Promise.all(
+		const auctionData = await Promise.all(
 			results.map((r) => this.getAuctionData(brand<TAuctionId>(r.id))),
 		);
+		return auctionData.filter((data): data is AuctionData => data !== null);
 	}
 
 	async getType(id: TAuctionId): Promise<AuctionType> {
-		const drizzle = this.db.getDrizzle();
-		const [data] = await drizzle
+		const [data] = await db
 			.select({ type: auctions.type })
 			.from(auctions)
 			.where(eq(auctions.id, id));
-		return data.type;
+		if (!data) throw new Error("Auction not found");
+		return data.type as AuctionType;
 	}
 
 	async getBidCount(id: TAuctionId): Promise<number> {
-		const drizzle = this.db.getDrizzle();
-		const [result] = await drizzle
+		const [result] = await db
 			.select({ count: sql<number>`COUNT(*)` })
 			.from(bids)
 			.where(eq(bids.auctionId, id));
+		if (!result) throw new Error("No result found for bid count");
 		return result.count;
 	}
 
 	async getByIdempotency(key: TIdempotencyKey): Promise<TAuctionId | null> {
-		const drizzle = this.db.getDrizzle();
-		const [result] = await drizzle
+		const [result] = await db
 			.select({ id: auctions.id })
 			.from(auctions)
 			.where(eq(auctions.idempotencyKey, key));
@@ -307,7 +291,7 @@ export class AuctionQueries implements IAuctionQueries {
 	}
 
 	async placeBid(
-		tx: Tx,
+		tx: any,
 		bidData: {
 			auctionId: TAuctionId;
 			bidderId: TUserId;
@@ -320,20 +304,20 @@ export class AuctionQueries implements IAuctionQueries {
 			const existing = await this.getBidByIdempotency(bidData.idempotencyKey);
 			if (existing) return existing.id;
 		}
-		const drizzle = this.db.getDrizzle();
-		const [result] = await drizzle
+		const [result] = await tx
 			.insert(bids)
 			.values({
 				auctionId: bidData.auctionId,
 				bidderId: bidData.bidderId,
-				amount: bidData.amount,
+				amount: bidData.amount.toString(),
 				quantity: bidData.quantity || 1,
 				status: "active",
 				version: 1,
 				idempotencyKey: bidData.idempotencyKey,
 			})
 			.returning({ id: bids.id });
-		await drizzle.insert(outboxEvents).values({
+		if (!result) throw new Error("Failed to place bid");
+		await tx.insert(outboxEvents).values({
 			eventType: "bid_placed",
 			auctionId: bidData.auctionId,
 			payload: { bidId: result.id, ...bidData } as any,
@@ -344,8 +328,7 @@ export class AuctionQueries implements IAuctionQueries {
 	async getBidByIdempotency(
 		key: TIdempotencyKey,
 	): Promise<{ id: TBidId } | null> {
-		const drizzle = this.db.getDrizzle();
-		const [result] = await drizzle
+		const [result] = await db
 			.select({ id: bids.id })
 			.from(bids)
 			.where(eq(bids.idempotencyKey, key));

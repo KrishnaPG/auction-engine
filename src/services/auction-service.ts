@@ -24,18 +24,18 @@ import type {
 export class AuctionService implements IAuctionService {
 	private auctionQueries: IAuctionQueries;
 	private winnerQueries: IWinnerQueries;
-	private dbAdapter: IDatabaseAdapter;
+	private db: any;
 	private outboxRepo: IOutboxRepository;
 
 	constructor(
 		auctionQueries: IAuctionQueries,
 		winnerQueries: IWinnerQueries,
-		dbAdapter: IDatabaseAdapter,
+		db: any,
 		outboxRepo: IOutboxRepository,
 	) {
 		this.auctionQueries = auctionQueries;
 		this.winnerQueries = winnerQueries;
-		this.dbAdapter = dbAdapter;
+		this.db = db;
 		this.outboxRepo = outboxRepo;
 	}
 
@@ -54,7 +54,7 @@ export class AuctionService implements IAuctionService {
 			if (existingId) return existingId;
 		}
 
-		return executeInTx(async (tx) => {
+		return this.db.executeInTransaction(async (tx) => {
 			// Insert auction via query
 			const id = await this.auctionQueries.createAuction(tx, auctionReq);
 
@@ -63,7 +63,7 @@ export class AuctionService implements IAuctionService {
 				event_type: "auction_created",
 				payload: { auctionId: id, ...auctionReq },
 				idempotency_key: idempotencyKey,
-				created_at: new Date() as TTimestamp,
+				created_at: Date.now() as TTimestamp,
 			});
 
 			return id;
@@ -93,7 +93,7 @@ export class AuctionService implements IAuctionService {
 		if (status !== AuctionStatus.ACTIVE)
 			throw new Error("Cannot end non-active auction");
 
-		return executeInTx(async (tx) => {
+		return this.db.executeInTransaction(async (tx) => {
 			// Update status
 			await tx
 				.update(auctions)
@@ -109,7 +109,7 @@ export class AuctionService implements IAuctionService {
 			await tx.insert(outbox).values({
 				event_type: "auction_ended",
 				payload: { auctionId: id, winnerId, finalPrice },
-				created_at: new Date() as TTimestamp,
+				created_at: Date.now() as TTimestamp,
 			});
 
 			return {
@@ -118,7 +118,7 @@ export class AuctionService implements IAuctionService {
 				winningBidId: null, // From winner query if needed
 				finalPrice,
 				totalBids: await this.auctionQueries.getBidCount(id), // Assume
-				endedAt: new Date() as TTimestamp,
+				endedAt: Date.now() as TTimestamp,
 				resultType: winnerId ? "sold" : "no_bids",
 			};
 		});
